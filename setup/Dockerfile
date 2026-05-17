@@ -36,6 +36,8 @@ RUN cd /home/student/dpdk && ninja -C build install && ldconfig
 USER student
 RUN cd /home/student  && git clone https://github.com/cchenaru/keysight-challenge-2026.git challenge-app
 
+COPY main.c /home/student/challenge-app/netem/main.c
+
 RUN cd /home/student/challenge-app/netem && meson setup build
 
 RUN cd /home/student/challenge-app/netem && ninja -C build
