@@ -99,10 +99,11 @@ typedef struct packet_queue_t {
 } packet_queue_t;
 
 #define QUEUE_RING_SIZE 4096
+packet_queue_t *queue;
 
-struct packet_queue_t *init_packet_queue(uint16_t id)
+packet_queue_t *init_packet_queue()
 {
-	struct packet_queue_t *queue =
+	packet_queue_t *queue =
 		rte_zmalloc("PQ_STATE", sizeof(struct packet_queue_t), 0);
 	char name_buf[] = "ring_pq";
 
@@ -123,7 +124,7 @@ struct packet_queue_t *init_packet_queue(uint16_t id)
 	return queue;
 }
 
-int enqueue_packet(packet_queue_t *queue, rte_mbuf *mbuf, PQ_t pq) {
+int enqueue_packet(rte_mbuf *mbuf, PQ_t pq) {
 	void *msg = NULL;
 	packet_t *pkt;
 
@@ -147,7 +148,7 @@ int enqueue_packet(packet_queue_t *queue, rte_mbuf *mbuf, PQ_t pq) {
 	return 0;
 }
 
-int dequeue_packet(packet_queue_t *queue, packet_t **pkt) {
+int dequeue_packet(packet_t **pkt) {
 	void *msg = NULL;
 
 	if (rte_ring_dequeue(queue->ring, &msg) < 0) {
@@ -374,6 +375,9 @@ int main(int argc, char **argv)
 		rte_exit(EXIT_FAILURE, "Invalid EAL arguments\n");
 	argc -= ret;
 	argv += ret;
+
+	// Init the packet queue
+	queue = init_packet_queue();
 
 	force_quit = false;
 	signal(SIGINT, signal_handler);
