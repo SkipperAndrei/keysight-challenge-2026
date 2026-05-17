@@ -194,11 +194,12 @@ static inline uint8_t classify_packet_to_config_idx(struct rte_mbuf *m)
 void worker_process_packet(void *args) {
 	uint8_t nb_packets_in_queue = 0;
 	uint8_t valid_count = 0;
+	int queue_type = *(int *)args; // 0 for receiver, 1 for transmitter
 	PQ_t pq_info;
 	while (!force_quit) {
 		struct rte_mbuf *pkts_burst[MAX_PKT_BURST];
 
-		if (* (int *)args == 0) 
+		if (queue_type == 0) 
 			nb_packets_in_queue = rte_ring_dequeue_burst(queue_receiver->ring, (void **)pkts_burst, MAX_PKT_BURST);
 		else 
 			nb_packets_in_queue = rte_ring_dequeue_burst(queue_producer->ring, (void **)pkts_burst, MAX_PKT_BURST);
@@ -212,7 +213,7 @@ void worker_process_packet(void *args) {
 			struct packet_t *m = pkts_burst[i];
 			pq_info = pq[m->pq_id];
 
-			if (m->send_time + US_TO_CYCLES(pq_info.delay_us) > rte_rdtsc()) {
+			if (m->send_time + US_TO_CYCLES(pq_info.delay_us) > rte_rdtsc()) { 
 				rte_ring_enqueue(queue->ring, m);
 				continue;
 			}
