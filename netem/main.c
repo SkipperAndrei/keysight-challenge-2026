@@ -127,6 +127,15 @@ int load_pq_config()
 		unsigned int pq_id;
 		if (sscanf(rest, "%u,%lf,%lf,%lu", &pq_id, &entry.drop_rate,
 				   &entry.double_rate, &entry.delay_us) != 4) {
+
+			if (entry.drop_rate < 0 || entry.drop_rate > 1) {
+				entry.drop_rate = 0;
+			}
+
+			if (entry.double_rate < 0 || entry.double_rate > 1) {
+				entry.double_rate = 0;
+			}
+
 			fprintf(stderr, "Bad fields on line %d: %s\n", count + 2, rest);
 			fclose(f);
 			return -1;
@@ -136,10 +145,10 @@ int load_pq_config()
 		// Parse pattern
 		unsigned int b[PATTERN_SIZE];
 		if (sscanf(pattern_str,
-					"%02x:%02x:%02x:%02x:%02x:%02x:"
-					"%02x:%02x:%02x:%02x:%02x:%02x",
-					&b[0], &b[1], &b[2], &b[3], &b[4], &b[5], &b[6], &b[7],
-					&b[8], &b[9], &b[10], &b[11]) != PATTERN_SIZE) {
+				   "%02x:%02x:%02x:%02x:%02x:%02x:"
+				   "%02x:%02x:%02x:%02x:%02x:%02x",
+				   &b[0], &b[1], &b[2], &b[3], &b[4], &b[5], &b[6], &b[7],
+				   &b[8], &b[9], &b[10], &b[11]) != PATTERN_SIZE) {
 			fprintf(stderr, "Bad pattern on line %d: %s\n", count + 2,
 					pattern_str);
 			fclose(f);
@@ -205,6 +214,7 @@ struct __rte_cache_aligned netem_port_statistics {
 	uint64_t tx;
 	uint64_t rx;
 	uint64_t dropped;
+	uint64_t duplicated;
 };
 struct netem_port_statistics port_statistics[NB_PORTS];
 
@@ -236,7 +246,8 @@ packet_queue_t *init_packet_queue(int queue_id)
 	return queue;
 }
 
-int enqueue_packet(struct rte_mbuf *mbuf, PQ_t pq, packet_queue_t *queue, uint8_t duplicate)
+int enqueue_packet(struct rte_mbuf *mbuf, PQ_t pq, packet_queue_t *queue,
+				   uint8_t duplicate)
 {
 	void *msg = NULL;
 	packet_t *pkt;
@@ -288,15 +299,15 @@ static inline uint8_t classify_packet_to_config_idx(struct rte_mbuf *m)
 	uint32_t scan_limit = pkt_len - PATTERN_SIZE + 1;
 
 	// Slide across the packet bytes
-	for (uint32_t i = 0; i < scan_limit; i++) {
-		uint32_t pkt_high = *(uint32_t *)(pkt_data + i);
-		uint32_t pkt_mid = *(uint32_t *)(pkt_data + i + 4);
-		uint32_t pkt_low = *(uint32_t *)(pkt_data + i + 8);
+	for (int p = 0; p < NUM_QUEUES; p++) {
+		uint32_t pattern_high = *(uint32_t *)pq[p].pattern;
+		uint32_t pattern_mid = *(uint32_t *)(pq[p].pattern + 4);
+		uint32_t pattern_low = *(uint32_t *)(pq[p].pattern + 8);
 
-		for (int p = 0; p < NUM_QUEUES; p++) {
-			uint32_t pattern_high = *(uint32_t *)pq[p].pattern;
-			uint32_t pattern_mid = *(uint32_t *)(pq[p].pattern + 4);
-			uint32_t pattern_low = *(uint32_t *)(pq[p].pattern + 8);
+		for (uint32_t i = 0; i < scan_limit; i++) {
+			uint32_t pkt_high = *(uint32_t *)(pkt_data + i);
+			uint32_t pkt_mid = *(uint32_t *)(pkt_data + i + 4);
+			uint32_t pkt_low = *(uint32_t *)(pkt_data + i + 8);
 
 			if (pkt_high == pattern_high && pkt_mid == pattern_mid &&
 				pkt_low == pattern_low) {
@@ -349,14 +360,20 @@ void worker_process_packet(int queue_id)
 				rte_rand() / (double)UINT64_MAX < pq_info.drop_rate) {
 				rte_pktmbuf_free(pkt->m); // Free the underlying mbuf
 				rte_mempool_put(queue->item_pool, pkt); // Free metadata wrapper
+
+				port_statistics[queue_id].dropped++;
+
 				continue;
 			}
 
 			if (!pkt->duplicate && pq_info.double_rate > 0 &&
 				rte_rand() / (double)UINT64_MAX < pq_info.double_rate) {
-				struct rte_mbuf *dup = rte_pktmbuf_clone(pkt->m, netem_pktmbuf_pool);
-				if (dup != NULL)
+				struct rte_mbuf *dup =
+					rte_pktmbuf_clone(pkt->m, netem_pktmbuf_pool);
+				if (dup != NULL) {
 					enqueue_packet(dup, pq_info, queue, 1);
+					port_statistics[queue_id].duplicated++;
+				}
 			}
 
 			// Hand off mbuf to TX thread — no tx_buffer call here
@@ -439,12 +456,13 @@ void tx_thread(int tx_port_id)
 /* Print out statistics on packets dropped */
 static void print_stats(void)
 {
-	uint64_t total_packets_dropped, total_packets_tx, total_packets_rx;
+	uint64_t total_packets_dropped, total_packets_tx, total_packets_rx, total_packets_duplicated;
 	unsigned portid;
 
 	total_packets_dropped = 0;
 	total_packets_tx = 0;
 	total_packets_rx = 0;
+	total_packets_duplicated = 0;
 
 	const char clr[] = { 27, '[', '2', 'J', '\0' };
 	const char topLeft[] = { 27, '[', '1', ';', '1', 'H', '\0' };
@@ -457,19 +475,21 @@ static void print_stats(void)
 	for (portid = 0; portid < NB_PORTS; portid++) {
 		printf("\nStatistics for port %u ------------------------------"
 			   "\nPackets sent: %24" PRIu64 "\nPackets received: %20" PRIu64
-			   "\nPackets dropped: %21" PRIu64,
+			   "\nPackets dropped: %21" PRIu64 "\nPackets duplicated: %18" PRIu64,
 			   portid, port_statistics[portid].tx, port_statistics[portid].rx,
-			   port_statistics[portid].dropped);
+			   port_statistics[portid].dropped, port_statistics[portid].duplicated);
 
 		total_packets_dropped += port_statistics[portid].dropped;
 		total_packets_tx += port_statistics[portid].tx;
 		total_packets_rx += port_statistics[portid].rx;
+		total_packets_duplicated += port_statistics[portid].duplicated;
 	}
 	printf("\nAggregate statistics ==============================="
 		   "\nTotal packets sent: %18" PRIu64
 		   "\nTotal packets received: %14" PRIu64
-		   "\nTotal packets dropped: %15" PRIu64,
-		   total_packets_tx, total_packets_rx, total_packets_dropped);
+		   "\nTotal packets dropped: %15" PRIu64
+		   "\nTotal packets duplicated: %12" PRIu64,
+		   total_packets_tx, total_packets_rx, total_packets_dropped, total_packets_duplicated);
 	printf("\n====================================================\n");
 
 	fflush(stdout);
@@ -542,8 +562,8 @@ int main(int argc, char **argv)
 
 	load_pq_config();
 
-		/* Init EAL */
-		ret = rte_eal_init(argc, argv);
+	/* Init EAL */
+	ret = rte_eal_init(argc, argv);
 	if (ret < 0)
 		rte_exit(EXIT_FAILURE, "Invalid EAL arguments\n");
 	argc -= ret;
