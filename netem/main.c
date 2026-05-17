@@ -206,14 +206,20 @@ static inline uint8_t classify_packet_to_config_idx(struct rte_mbuf *m)
 
 	// Slide across the packet bytes
 	for (uint32_t i = 0; i < scan_limit; i++) {
-		uint8_t *current_window = &pkt_data[i];
+		uint32_t pkt_high = *(uint32_t *)(pkt_data + i);
+		uint32_t pkt_mid = *(uint32_t *)(pkt_data + i + 4);
+		uint32_t pkt_low = *(uint32_t *)(pkt_data + i + 8);
 
-		// Match against your 10 custom patterns
-		for (uint8_t p = 0; p < NUM_QUEUES; p++) {
-			if (memcmp(current_window, pq[p].pattern, PATTERN_SIZE) == 0) {
-				return p; // Return index of the matched configuration profile
+		for (int p = 0; p < NUM_QUEUES; p++) {
+			uint32_t pattern_high = *(uint32_t *)pq[p].pattern;
+			uint32_t pattern_mid = *(uint32_t *)(pq[p].pattern + 4);
+			uint32_t pattern_low = *(uint32_t *)(pq[p].pattern + 8);
+
+			if (pkt_high == pattern_high && pkt_mid == pattern_mid &&
+				pkt_low == pattern_low) {
+				return pq[p].pq_id;
 			}
-		}
+			}
 	}
 
 	return DEFAULT_PQ_INDEX; // Fallback profile index
