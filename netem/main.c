@@ -58,7 +58,7 @@ static uint16_t nb_txd = TX_DESC_DEFAULT;
 
 #define NUM_QUEUES 10
 #define PATTERN_SIZE 12
-#define DEFAULT_PQ_INDEX 10
+#define DEFAULT_PQ_INDEX NUM_QUEUES
 
 typedef struct delayed_t {
 	struct rte_mbuf *m;
@@ -134,31 +134,32 @@ int load_pq_config()
 		entry.pq_id = (uint8_t)pq_id;
 
 		// Parse pattern
-		if (strncmp(pattern_str, "default", 7) == 0) {
-			memset(entry.pattern, 0, PATTERN_SIZE);
-		} else {
-			unsigned int b[PATTERN_SIZE];
-			if (sscanf(pattern_str,
-					   "%02x:%02x:%02x:%02x:%02x:%02x:"
-					   "%02x:%02x:%02x:%02x:%02x:%02x",
-					   &b[0], &b[1], &b[2], &b[3], &b[4], &b[5], &b[6], &b[7],
-					   &b[8], &b[9], &b[10], &b[11]) != PATTERN_SIZE) {
-				fprintf(stderr, "Bad pattern on line %d: %s\n", count + 2,
-						pattern_str);
-				fclose(f);
-				return -1;
-			}
-			for (int i = 0; i < PATTERN_SIZE; i++)
-				entry.pattern[i] = (unsigned char)b[i];
+		unsigned int b[PATTERN_SIZE];
+		if (sscanf(pattern_str,
+					"%02x:%02x:%02x:%02x:%02x:%02x:"
+					"%02x:%02x:%02x:%02x:%02x:%02x",
+					&b[0], &b[1], &b[2], &b[3], &b[4], &b[5], &b[6], &b[7],
+					&b[8], &b[9], &b[10], &b[11]) != PATTERN_SIZE) {
+			fprintf(stderr, "Bad pattern on line %d: %s\n", count + 2,
+					pattern_str);
+			fclose(f);
+			return -1;
 		}
+		for (int i = 0; i < PATTERN_SIZE; i++)
+			entry.pattern[i] = (unsigned char)b[i];
 
 		pq[count++] = entry;
 	}
 
+	PQ_t default_entry;
+	memset(&default_entry, 0, sizeof(default_entry));
+	default_entry.pq_id = DEFAULT_PQ_INDEX;
+	pq[DEFAULT_PQ_INDEX] = default_entry; // Last entry is default profile
+
 	fclose(f);
 
-	if (count != NUM_QUEUES + 1) {
-		fprintf(stderr, "Expected %d entries, got %d\n", NUM_QUEUES + 1, count);
+	if (count != NUM_QUEUES) {
+		fprintf(stderr, "Expected %d entries, got %d\n", NUM_QUEUES, count);
 		return -1;
 	}
 
