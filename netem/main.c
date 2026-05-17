@@ -70,7 +70,7 @@ typedef struct packet_t {
 	struct rte_mbuf *m;
 	uint8_t pq_id;
 	uint64_t send_time;
-	uint16_t rx_port_id, tx_port_id;
+	uint8_t duplicate;
 } packet_t;
 
 typedef struct PQ_t {
@@ -144,7 +144,7 @@ static const PQ_t pq[NUM_QUEUES + 1] = {
 	  0,
 	  0 },
 
-	{ { 0 }, DEFAULT_PQ_INDEX, 0, 0, 0 } // Default PQ
+	{ { 0 }, DEFAULT_PQ_INDEX, 0, 1, 0 } // Default PQ
 };
 
 typedef struct packet_queue_t {
@@ -216,7 +216,7 @@ packet_queue_t *init_packet_queue(int queue_id)
 	return queue;
 }
 
-int enqueue_packet(struct rte_mbuf *mbuf, PQ_t pq, packet_queue_t *queue)
+int enqueue_packet(struct rte_mbuf *mbuf, PQ_t pq, packet_queue_t *queue, uint8_t duplicate)
 {
 	void *msg = NULL;
 	packet_t *pkt;
@@ -231,6 +231,7 @@ int enqueue_packet(struct rte_mbuf *mbuf, PQ_t pq, packet_queue_t *queue)
 	pkt->m = mbuf;
 	pkt->pq_id = pq.pq_id;
 	pkt->send_time = rte_rdtsc();
+	pkt->duplicate = duplicate;
 
 	if (rte_ring_enqueue(queue->ring, pkt) < 0) {
 		// Ring is completely full; clean up allocations to prevent memory leaks
@@ -331,13 +332,11 @@ void worker_process_packet(int queue_id)
 				continue;
 			}
 
-			if (pq_info.double_rate > 0 &&
+			if (!pkt->duplicate && pq_info.double_rate > 0 &&
 				rte_rand() / (double)UINT64_MAX < pq_info.double_rate) {
-				struct rte_mbuf *dup_pkt =
-					rte_pktmbuf_clone(pkt->m, netem_pktmbuf_pool);
-				if (dup_pkt != NULL) {
-					enqueue_packet(dup_pkt, pq_info, queue);
-				}
+				struct rte_mbuf *dup = rte_pktmbuf_clone(pkt->m, netem_pktmbuf_pool);
+				if (dup != NULL)
+					enqueue_packet(dup, pq_info, queue, 1);
 			}
 
 			// Hand off mbuf to TX thread — no tx_buffer call here
@@ -367,7 +366,7 @@ void producer(int rx_port_id)
 			struct rte_mbuf *m = pkts_burst[i];
 
 			uint8_t pq_idx = classify_packet_to_config_idx(m);
-			enqueue_packet(m, pq[pq_idx], queues[rx_port_id]);
+			enqueue_packet(m, pq[pq_idx], queues[rx_port_id], 0);
 		}
 	}
 }
