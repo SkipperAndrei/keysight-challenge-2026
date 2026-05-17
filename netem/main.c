@@ -42,6 +42,9 @@ static volatile bool force_quit;
 #define MEMPOOL_CACHE_SIZE 256
 #define DELAY_BUF_SIZE 1024
 
+// Convert microseconds to CPU cycles for accurate timing
+#define US_TO_CYCLES(X) (((uint64_t)(X)*rte_get_tsc_hz()) / 1000000)
+
 /*
  * Configurable number of RX/TX ring descriptors
  */
@@ -66,6 +69,7 @@ typedef struct delayed_t {
 typedef struct packet_t {
 	struct rte_mbuf *m;
 	uint8_t pq_id;
+	uint64_t send_time;
 } packet_t;
 
 typedef struct PQ_t {
@@ -90,7 +94,7 @@ static const PQ_t pq[NUM_QUEUES + 1] = {
 	{{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C}, 8, 0, 0, 0},
 	{{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C}, 9, 0, 0, 0},
     
-    {{0}, 10, 0, 0, 0} // Default PQ
+    {{0}, DEFAULT_PQ_INDEX, 0, 0, 0} // Default PQ
 };
 
 typedef struct packet_queue_t {
@@ -186,48 +190,43 @@ static inline uint8_t classify_packet_to_config_idx(struct rte_mbuf *m)
     return DEFAULT_PQ_INDEX; // Fallback profile index
 }
 
-
 void worker_process_packet(void *args) {
 
 	uint8_t nb_packets_in_queue = 0;
-	delayed_t delay_buffer[DELAY_BUF_SIZE];
-	uint16_t read_idx = 0, write_idx = 0;
 	PQ_t pq_info;
 	while (!force_quit) {
-		for (int q = 0; q < NUM_QUEUES + 1; q++) {
-			struct rte_mbuf *pkts_burst[MAX_PKT_BURST];
-			// Todo: Change packet_queues name after vlad commits
-			nb_packets_in_queue = rte_ring_dequeue_burst(packet_queues[q].ring, (void **)pkts_burst, MAX_PKT_BURST);
+		struct rte_mbuf *pkts_burst[MAX_PKT_BURST];
+		nb_packets_in_queue = rte_ring_dequeue_burst(queue->ring, (void **)pkts_burst, MAX_PKT_BURST);
 
-			if (unlikely(nb_packets_in_queue == 0))
+		if (unlikely(nb_packets_in_queue == 0))
+			continue;
+
+		for (uint8_t i = 0; i < nb_packets_in_queue; i++) {
+			rte_prefetch0(rte_pktmbuf_mtod(pkts_burst[i], void *));
+			struct packet_t *m = pkts_burst[i];
+			pq_info = pq[m->pq_id];
+
+			if (m->send_time + US_TO_CYCLES(pq_info.delay_us) > rte_rdtsc()) {
+				rte_ring_enqueue(queue->ring, m);
 				continue;
-			
-			pq_info = pq[q];
+			}
 
-			if (pq_info.drop_rate > 0) {
-				for (uint8_t i = 0; i < nb_packets_in_queue; i++) {
-					if (rte_rand() / (double)UINT32_MAX < pq_info.drop_rate) {
-						rte_pktmbuf_free(pkts_burst[i]);
-						continue;
-					}
+			if (pq_info.drop_rate > 0 && rte_rand() / (double)UINT32_MAX < pq_info.drop_rate) {
+				rte_pktmbuf_free(m);
+				continue;
+			}
+
+			if (pq_info.double_rate > 0 && rte_rand() / (double)UINT32_MAX < pq_info.double_rate) {
+				struct rte_mbuf *dup_pkt = rte_pktmbuf_clone(m, netem_pktmbuf_pool);
+				if (dup_pkt != NULL) {
+					enqueue_packet(dup_pkt, pq_info);
+				} else {
+					RTE_LOG(WARNING, NETEM, "Failed to clone packet for doubling in PQ %u\n", pq_info.pq_id);
 				}
 			}
 
-			if (pq_info.double_rate > 0) {
-				for (uint8_t i = 0; i < nb_packets_in_queue; i++) {
-					if (rte_rand() / (double)UINT32_MAX < pq_info.double_rate) {
-						// Enqueue a duplicate of the packet
-						struct rte_mbuf *dup_pkt = rte_pktmbuf_clone(pkts_burst[i], netem_pktmbuf_pool);
-						if (dup_pkt != NULL) {
-							enqueue_packet(&packet_queues[q], dup_pkt, pq_info);
-						} else {
-							RTE_LOG(WARNING, NETEM, "Failed to clone packet for doubling in PQ %u\n", pq_info.pq_id);
-						}
-
-					}
-				}
-			}			
-		}
+			// Process the packet (e.g., send it out, or further processing)
+		}		
 	}
 }
 
