@@ -258,12 +258,7 @@ int enqueue_packet(struct rte_mbuf *mbuf, PQ_t pq, packet_queue_t *queue,
 	pkt->send_time = rte_rdtsc();
 	pkt->duplicate = duplicate;
 
-	if (rte_ring_enqueue(queue->ring, pkt) < 0) {
-		// Ring is completely full; clean up allocations to prevent memory leaks
-		rte_pktmbuf_free(mbuf);
-		rte_mempool_put(queue->item_pool, pkt);
-		return -1;
-	}
+	while (rte_ring_enqueue(queue->ring, pkt) < 0);
 
 	return 0;
 }
@@ -346,7 +341,8 @@ void worker_process_packet(int queue_id)
 			rte_prefetch0(rte_pktmbuf_mtod(pkt->m, void *));
 			if (pq_info.delay_us > 0 &&
 				pkt->send_time + US_TO_CYCLES(pq_info.delay_us) > rte_rdtsc()) {
-				rte_ring_enqueue(queue->ring, pkt);
+				while (rte_ring_enqueue(queue->ring, pkt) < 0)
+                ;
 				continue;
 			}
 
