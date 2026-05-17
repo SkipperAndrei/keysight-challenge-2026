@@ -109,6 +109,15 @@ packet_queue_t *queues[2];
 /* ethernet addresses of ports */
 static struct rte_ether_addr netem_ports_eth_addr[NB_PORTS];
 
+// Define the maximum number of worker cores your application will use
+#define MAX_WORKERS 128
+
+// Change the 1D tx_buffer array into a 2D array: [lcore_id][port_id]
+static struct rte_eth_dev_tx_buffer *per_core_tx_buffer[MAX_WORKERS][NB_PORTS];
+
+// Track the actual number of worker cores allocated
+static unsigned int nb_workers = 0;
+
 static struct rte_eth_dev_tx_buffer *tx_buffer[NB_PORTS];
 
 static struct rte_eth_conf port_conf = {
@@ -139,7 +148,7 @@ packet_queue_t *init_packet_queue(int queue_id)
 	// Initialize lockless ring optimized for Single-Producer / Single-Consumer mapping
 	sprintf(name_buf, "ring_pq_%d", queue_id);
 	queue->ring = rte_ring_create(name_buf, QUEUE_RING_SIZE, rte_socket_id(),
-								  RING_F_SP_ENQ | RING_F_SC_DEQ);
+								  RING_F_SP_ENQ | RING_F_MC_DEQ);
 
 	// Initialize an ultra-fast local object cache pool for your custom struct elements
 	sprintf(name_buf, "pool_pq_%d", queue_id);
@@ -169,6 +178,7 @@ int enqueue_packet(rte_mbuf *mbuf, PQ_t pq, packet_queue_t *queue)
 	pkt = (packet_t *)msg;
 	pkt->m = mbuf;
 	pkt->pq_id = pq.pq_id;
+	pkt->send_time = rte_rdtsc();
 
 	if (rte_ring_enqueue(queue->ring, pkt) < 0) {
 		// Ring is completely full; clean up allocations to prevent memory leaks
@@ -228,14 +238,17 @@ static inline uint8_t classify_packet_to_config_idx(struct rte_mbuf *m)
 void worker_process_packet(void *args)
 {
 	uint8_t nb_packets_in_queue = 0;
-	uint8_t valid_count = 0;
-	uint8_t nb_tx_worker = 0;
-	int queue_id = *(int *)args; // 0 for receiver, 1 for transmitter
+	int queue_id = *(int *)args;
 	PQ_t pq_info;
 
-	int tx_port_id = queue_id ^ 1; // Transmit to the opposite port
-	struct rte_eth_dev_tx_buffer *buffer = tx_buffer[tx_port_id];
+	int tx_port_id = queue_id ^ 1;
+	unsigned int my_lcore = rte_lcore_id();
 
+	// Calculate a unique TX hardware queue ID assigned to this thread (0 to nb_workers - 1)
+	// If your launch arguments include a thread index, use that. Otherwise, map via lcore configuration.
+	unsigned int tx_queue_id = rte_lcore_index(my_lcore) - 1;
+
+	struct rte_eth_dev_tx_buffer *buffer = per_core_tx_buffer[my_lcore][tx_port_id];
 	packet_queue_t *queue = queues[queue_id];
 
 	while (!force_quit) {
@@ -244,14 +257,13 @@ void worker_process_packet(void *args)
 		nb_packets_in_queue = rte_ring_dequeue_burst(
 			queue->ring, (void **)pkts_burst, MAX_PKT_BURST);
 
-		valid_count = 0;
 		if (unlikely(nb_packets_in_queue == 0))
 			continue;
 
 		for (uint8_t i = 0; i < nb_packets_in_queue; i++) {
 			struct packet_t *pkt = pkts_burst[i];
 			pq_info = pq[pkt->pq_id];
-			
+
 			rte_prefetch0(rte_pktmbuf_mtod(pkt->m, void *));
 
 			if (pkt->send_time + US_TO_CYCLES(pq_info.delay_us) > rte_rdtsc()) {
@@ -261,44 +273,25 @@ void worker_process_packet(void *args)
 
 			if (pq_info.drop_rate > 0 &&
 				rte_rand() / (double)UINT32_MAX < pq_info.drop_rate) {
-				rte_pktmbuf_free(pkt);
+				rte_pktmbuf_free(pkt->m); // Free the underlying mbuf
+				rte_mempool_put(queue->item_pool, pkt); // Free metadata wrapper
 				continue;
 			}
 
 			if (pq_info.double_rate > 0 &&
 				rte_rand() / (double)UINT32_MAX < pq_info.double_rate) {
 				struct rte_mbuf *dup_pkt =
-					rte_pktmbuf_clone(pkt, netem_pktmbuf_pool);
+					rte_pktmbuf_clone(pkt->m, netem_pktmbuf_pool);
 				if (dup_pkt != NULL) {
 					enqueue_packet(dup_pkt, pq_info, queue);
-				} else {
-					RTE_LOG(WARNING, NETEM,
-							"Failed to clone packet for doubling in PQ %u\n",
-							pq_info.pq_id);
 				}
 			}
 
-			int sent = rte_eth_tx_buffer(tx_port_id, 0, buffer, pkt->m);
-			if (sent)
-				port_statistics[tx_port_id].tx += sent;
+			int sent = rte_eth_tx_buffer(tx_port_id, tx_queue_id, buffer, pkt->m);
+			if (sent) port_statistics[tx_port_id].tx += sent;
 
-			// 6. Free the metadata wrapper back to its pool
+			// Free the metadata wrapper wrapper back to its pool
 			rte_mempool_put(queue->item_pool, pkt);
-		}
-
-		if (valid_count > 0) {
-			// For example, if this is the transmitter worker, send out the valid packets
-			if (queue_id == 1) {
-				nb_tx_worker = rte_eth_tx_burst(1, 0, pkts_burst, valid_count);
-			} else {
-				nb_tx_worker = rte_eth_tx_burst(0, 1, pkts_burst, valid_count);
-			}
-
-			if (unlikely(nb_tx_worker < valid_count)) {
-				for (uint8_t i = nb_tx_worker; i < valid_count; i++) {
-					rte_pktmbuf_free(pkts_burst[i]);
-				}
-			}
 		}
 	}
 }
@@ -465,7 +458,16 @@ static void netem_main_loop(void)
 
 static int netem_launch_one_lcore(__rte_unused void *dummy)
 {
-	netem_main_loop();
+	unsigned int lcore_id = rte_lcore_id();
+	unsigned int lcore_idx = rte_lcore_index(lcore_id);
+
+	if (lcore_idx < 2) {
+		producer(&lcore_idx);
+	} else {
+		int queue_id = lcore_idx % 2;
+		worker_process_packet(&queue_id);
+	}
+
 	return 0;
 }
 
@@ -520,6 +522,16 @@ int main(int argc, char **argv)
 	if (netem_pktmbuf_pool == NULL)
 		rte_exit(EXIT_FAILURE, "Cannot init mbuf pool\n");
 
+	nb_workers = 0;
+	unsigned int lcore;
+	RTE_LCORE_FOREACH_WORKER(lcore)
+	{
+		nb_workers++;
+	}
+	// Safety fallback if no worker cores are passed
+	if (nb_workers == 0)
+		nb_workers = 2;
+
 	/* Initialize each port */
 	RTE_ETH_FOREACH_DEV(portid)
 	{
@@ -544,7 +556,7 @@ int main(int argc, char **argv)
 			local_port_conf.txmode.offloads |=
 				RTE_ETH_TX_OFFLOAD_MBUF_FAST_FREE;
 		/* Configure the number of queues for a port. */
-		ret = rte_eth_dev_configure(portid, 1, 1, &local_port_conf);
+		ret = rte_eth_dev_configure(portid, 1, nb_workers, &local_port_conf);
 		if (ret < 0)
 			rte_exit(EXIT_FAILURE, "Cannot configure device: err=%d, port=%u\n",
 					 ret, portid);
@@ -576,29 +588,38 @@ int main(int argc, char **argv)
 		fflush(stdout);
 		txq_conf = dev_info.default_txconf;
 		txq_conf.offloads = local_port_conf.txmode.offloads;
-		ret = rte_eth_tx_queue_setup(portid, 0, nb_txd,
-									 rte_eth_dev_socket_id(portid), &txq_conf);
-		if (ret < 0)
-			rte_exit(EXIT_FAILURE, "rte_eth_tx_queue_setup:err=%d, port=%u\n",
-					 ret, portid);
+
+		for (uint16_t q = 0; q < nb_workers; q++) {
+			ret = rte_eth_tx_queue_setup(
+				portid, q, nb_txd, rte_eth_dev_socket_id(portid), &txq_conf);
+			if (ret < 0)
+				rte_exit(EXIT_FAILURE,
+						 "rte_eth_tx_queue_setup:err=%d, port=%u, queue=%u\n",
+						 ret, portid, q);
+		}
 
 		/* Initialize TX buffers */
-		tx_buffer[portid] = rte_zmalloc_socket(
-			"tx_buffer", RTE_ETH_TX_BUFFER_SIZE(MAX_PKT_BURST), 0,
-			rte_eth_dev_socket_id(portid));
-		if (tx_buffer[portid] == NULL)
-			rte_exit(EXIT_FAILURE, "Cannot allocate buffer for tx on port %u\n",
-					 portid);
+		unsigned int worker_idx = 0;
+        RTE_LCORE_FOREACH_WORKER(lcore) {
+            
+            per_core_tx_buffer[lcore][portid] = rte_zmalloc_socket(
+                "tx_buffer", RTE_ETH_TX_BUFFER_SIZE(MAX_PKT_BURST), 0,
+                rte_eth_dev_socket_id(portid));
+                
+            if (per_core_tx_buffer[lcore][portid] == NULL)
+                rte_exit(EXIT_FAILURE, "Cannot allocate buffer for lcore %u on port %u\n", lcore, portid);
 
-		rte_eth_tx_buffer_init(tx_buffer[portid], MAX_PKT_BURST);
+            rte_eth_tx_buffer_init(per_core_tx_buffer[lcore][portid], MAX_PKT_BURST);
 
-		ret = rte_eth_tx_buffer_set_err_callback(
-			tx_buffer[portid], rte_eth_tx_buffer_count_callback,
-			&port_statistics[portid].dropped);
-		if (ret < 0)
-			rte_exit(EXIT_FAILURE,
-					 "Cannot set error callback for tx buffer on port %u\n",
-					 portid);
+            // Dynamically link error drops to this port's statistics
+            ret = rte_eth_tx_buffer_set_err_callback(
+                per_core_tx_buffer[lcore][portid], 
+                rte_eth_tx_buffer_count_callback,
+                &port_statistics[portid].dropped);
+                
+            if (ret < 0)
+                rte_exit(EXIT_FAILURE, "Cannot set error callback on port %u\n", portid);
+        }
 
 		ret = rte_eth_dev_set_ptypes(portid, RTE_PTYPE_UNKNOWN, NULL, 0);
 		if (ret < 0)
