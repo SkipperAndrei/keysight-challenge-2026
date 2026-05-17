@@ -155,6 +155,9 @@ typedef struct packet_queue_t {
 #define QUEUE_RING_SIZE 4096
 packet_queue_t *queues[2];
 
+#define TX_RING_SIZE 4096
+static struct rte_ring *tx_ring[NB_PORTS] = { NULL, NULL };
+
 /* ethernet addresses of ports */
 static struct rte_ether_addr netem_ports_eth_addr[NB_PORTS];
 
@@ -322,14 +325,14 @@ void worker_process_packet(int queue_id)
 			}
 
 			if (pq_info.drop_rate > 0 &&
-				rte_rand() / (double)UINT32_MAX < pq_info.drop_rate) {
+				rte_rand() / (double)UINT64_MAX < pq_info.drop_rate) {
 				rte_pktmbuf_free(pkt->m); // Free the underlying mbuf
 				rte_mempool_put(queue->item_pool, pkt); // Free metadata wrapper
 				continue;
 			}
 
 			if (pq_info.double_rate > 0 &&
-				rte_rand() / (double)UINT32_MAX < pq_info.double_rate) {
+				rte_rand() / (double)UINT64_MAX < pq_info.double_rate) {
 				struct rte_mbuf *dup_pkt =
 					rte_pktmbuf_clone(pkt->m, netem_pktmbuf_pool);
 				if (dup_pkt != NULL) {
@@ -337,12 +340,10 @@ void worker_process_packet(int queue_id)
 				}
 			}
 
-			int sent =
-				rte_eth_tx_buffer(tx_port_id, tx_queue_id, buffer, pkt->m);
-			if (sent)
-				port_statistics[tx_port_id].tx += sent;
+			// Hand off mbuf to TX thread — no tx_buffer call here
+			while (rte_ring_enqueue(tx_ring[tx_port_id], pkt->m) < 0)
+				;
 
-			// Free the metadata wrapper wrapper back to its pool
 			rte_mempool_put(queue->item_pool, pkt);
 		}
 	}
@@ -369,6 +370,51 @@ void producer(int rx_port_id)
 			enqueue_packet(m, pq[pq_idx], queues[rx_port_id]);
 		}
 	}
+}
+
+void tx_thread(int tx_port_id)
+{
+	const uint16_t tx_queue_id = 0;
+	const uint64_t drain_tsc =
+		(rte_get_tsc_hz() + US_PER_S - 1) / US_PER_S * BURST_TX_DRAIN_US;
+	uint64_t prev_tsc = rte_rdtsc();
+
+	unsigned int my_lcore = rte_lcore_id();
+	struct rte_eth_dev_tx_buffer *buffer =
+		per_core_tx_buffer[my_lcore][tx_port_id];
+
+	if (unlikely(buffer == NULL)) {
+		RTE_LOG(ERR, NETEM, "TX thread: no buffer for lcore %u port %u\n",
+				my_lcore, tx_port_id);
+		return;
+	}
+
+	RTE_LOG(INFO, NETEM, "TX thread on lcore %u handling port %u\n", my_lcore,
+			tx_port_id);
+
+	while (!force_quit) {
+		struct rte_mbuf *mbufs[MAX_PKT_BURST];
+
+		uint16_t nb = rte_ring_dequeue_burst(
+			tx_ring[tx_port_id], (void **)mbufs, MAX_PKT_BURST, NULL);
+
+		for (uint16_t i = 0; i < nb; i++) {
+			int sent =
+				rte_eth_tx_buffer(tx_port_id, tx_queue_id, buffer, mbufs[i]);
+			if (sent)
+				port_statistics[tx_port_id].tx += sent;
+		}
+
+		uint64_t cur_tsc = rte_rdtsc();
+		if (unlikely(cur_tsc - prev_tsc > drain_tsc)) {
+			int sent = rte_eth_tx_buffer_flush(tx_port_id, tx_queue_id, buffer);
+			if (sent)
+				port_statistics[tx_port_id].tx += sent;
+			prev_tsc = cur_tsc;
+		}
+	}
+
+	rte_eth_tx_buffer_flush(tx_port_id, tx_queue_id, buffer);
 }
 
 /* Print out statistics on packets dropped */
@@ -413,65 +459,27 @@ static void print_stats(void)
 /* main processing loop */
 static void netem_main_loop(void)
 {
-	struct rte_mbuf *pkts_burst[MAX_PKT_BURST];
-	struct rte_mbuf *m;
-	int sent;
-	unsigned lcore_id;
-	uint64_t prev_tsc, diff_tsc, cur_tsc, timer_tsc;
-	unsigned i, nb_rx;
+	uint64_t prev_tsc = 0, diff_tsc, cur_tsc, timer_tsc = 0;
 	const uint64_t drain_tsc =
 		(rte_get_tsc_hz() + US_PER_S - 1) / US_PER_S * BURST_TX_DRAIN_US;
-	struct rte_eth_dev_tx_buffer *buffer;
 
-	prev_tsc = 0;
-	timer_tsc = 0;
-
-	lcore_id = rte_lcore_id();
-
-	/* On the RX path, the lcore reads the packets from it's port.
-	 * For lcore_id 0, set the rx_port_id to 0.
-	 * For lcore_id 1, set the rx_port_id to 1.
-	 */
-	uint16_t rx_port_id = lcore_id;
-
-	/* On the TX path, the lcore will send the packets to the other port
-	 * For lcore_id 0, set the tx_port_id to 1.
-	 * For lcore_id 1, set the tx_port_id to 0.
-	 */
-	uint16_t tx_port_id = lcore_id ^ 1;
-
-	printf("lcore_id %u, tx %u, rx %u\n", lcore_id, tx_port_id, rx_port_id);
-
+	unsigned lcore_id = rte_lcore_id();
 	RTE_LOG(INFO, NETEM, "entering main loop on lcore %u\n", lcore_id);
 
 	while (!force_quit) {
-		/* Drains the TX queue after a certain time */
 		cur_tsc = rte_rdtsc();
-
 		diff_tsc = cur_tsc - prev_tsc;
+
 		if (unlikely(diff_tsc > drain_tsc)) {
-			buffer = tx_buffer[tx_port_id];
-
-			sent = rte_eth_tx_buffer_flush(tx_port_id, 0, buffer);
-			if (sent)
-				port_statistics[tx_port_id].tx += sent;
-
-			/* if timer is enabled */
 			if (timer_period > 0) {
-				/* advance the timer */
 				timer_tsc += diff_tsc;
-
-				/* if timer has reached its timeout */
 				if (unlikely(timer_tsc >= timer_period)) {
-					/* do this only on main core */
 					if (lcore_id == rte_get_main_lcore()) {
 						print_stats();
-						/* reset the timer */
 						timer_tsc = 0;
 					}
 				}
 			}
-
 			prev_tsc = cur_tsc;
 		}
 	}
@@ -486,6 +494,8 @@ static int netem_launch_one_lcore(__rte_unused void *dummy)
 		netem_main_loop();
 	} else if (lcore_idx < 3) {
 		producer(lcore_idx - 1);
+	} else if (lcore_idx < 5) {
+		tx_thread((lcore_idx - 1) % NB_PORTS);
 	} else {
 		worker_process_packet(lcore_idx % 2);
 	}
@@ -521,6 +531,15 @@ int main(int argc, char **argv)
 	// Init the packet queue
 	queues[0] = init_packet_queue(0);
 	queues[1] = init_packet_queue(1);
+
+	for (int i = 0; i < NB_PORTS; i++) {
+		char name[32];
+		snprintf(name, sizeof(name), "tx_ring_%d", i);
+		tx_ring[i] = rte_ring_create(name, TX_RING_SIZE, rte_socket_id(),
+									 RING_F_SC_DEQ); // single consumer per ring
+		if (tx_ring[i] == NULL)
+			rte_exit(EXIT_FAILURE, "Cannot create tx_ring[%d]\n", i);
+	}
 
 	force_quit = false;
 	signal(SIGINT, signal_handler);
@@ -578,7 +597,7 @@ int main(int argc, char **argv)
 			local_port_conf.txmode.offloads |=
 				RTE_ETH_TX_OFFLOAD_MBUF_FAST_FREE;
 		/* Configure the number of queues for a port. */
-		ret = rte_eth_dev_configure(portid, 1, nb_workers, &local_port_conf);
+		ret = rte_eth_dev_configure(portid, 1, 1, &local_port_conf);
 		if (ret < 0)
 			rte_exit(EXIT_FAILURE, "Cannot configure device: err=%d, port=%u\n",
 					 ret, portid);
@@ -611,7 +630,7 @@ int main(int argc, char **argv)
 		txq_conf = dev_info.default_txconf;
 		txq_conf.offloads = local_port_conf.txmode.offloads;
 
-		for (uint16_t q = 0; q < nb_workers; q++) {
+		for (uint16_t q = 0; q < 1; q++) {
 			ret = rte_eth_tx_queue_setup(
 				portid, q, nb_txd, rte_eth_dev_socket_id(portid), &txq_conf);
 			if (ret < 0)

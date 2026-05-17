@@ -37,6 +37,7 @@ USER student
 RUN cd /home/student  && git clone https://github.com/cchenaru/keysight-challenge-2026.git challenge-app
 
 COPY main.c /home/student/challenge-app/netem/main.c
+COPY run.sh /home/student/challenge-app/netem/run.sh
 
 RUN cd /home/student/challenge-app/netem && meson setup build
 
