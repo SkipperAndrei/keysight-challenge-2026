@@ -13,6 +13,7 @@ RUN apt update && apt install -y curl \
         python3-pyelftools \
         python3-setuptools \
         python3-wheel \
+        tshark \
         libnuma-dev \
         libpcap-dev \
         libelf-dev \
