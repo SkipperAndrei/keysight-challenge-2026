@@ -103,7 +103,8 @@ typedef struct packet_queue_t {
 } packet_queue_t;
 
 #define QUEUE_RING_SIZE 4096
-packet_queue_t *queue;
+packet_queue_t *queue_receiver;
+packet_queue_t *queue_transmiter;
 
 packet_queue_t *init_packet_queue()
 {
@@ -191,13 +192,18 @@ static inline uint8_t classify_packet_to_config_idx(struct rte_mbuf *m)
 }
 
 void worker_process_packet(void *args) {
-
 	uint8_t nb_packets_in_queue = 0;
+	uint8_t valid_count = 0;
 	PQ_t pq_info;
 	while (!force_quit) {
 		struct rte_mbuf *pkts_burst[MAX_PKT_BURST];
-		nb_packets_in_queue = rte_ring_dequeue_burst(queue->ring, (void **)pkts_burst, MAX_PKT_BURST);
 
+		if (* (int *)args == 0) 
+			nb_packets_in_queue = rte_ring_dequeue_burst(queue_receiver->ring, (void **)pkts_burst, MAX_PKT_BURST);
+		else 
+			nb_packets_in_queue = rte_ring_dequeue_burst(queue_producer->ring, (void **)pkts_burst, MAX_PKT_BURST);
+		
+		valid_count = 0;
 		if (unlikely(nb_packets_in_queue == 0))
 			continue;
 
@@ -225,8 +231,12 @@ void worker_process_packet(void *args) {
 				}
 			}
 
+			pkts_burst[valid_count] = pkts_burst[i];	
+			valid_count++;
 			// Process the packet (e.g., send it out, or further processing)
-		}		
+		}
+		
+		
 	}
 }
 
@@ -421,7 +431,8 @@ int main(int argc, char **argv)
 	argv += ret;
 
 	// Init the packet queue
-	queue = init_packet_queue();
+	queue_receiver = init_packet_queue();
+	queue_transmiter = init_packet_queue();
 
 	force_quit = false;
 	signal(SIGINT, signal_handler);
