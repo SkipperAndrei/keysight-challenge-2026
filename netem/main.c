@@ -446,42 +446,81 @@ void tx_thread(int tx_port_id)
 /* Print out statistics on packets dropped */
 static void print_stats(void)
 {
-	uint64_t total_packets_dropped, total_packets_tx, total_packets_rx, total_packets_duplicated;
-	unsigned portid;
+	static uint64_t last_tx[NB_PORTS] = { 0 };
+	static uint64_t last_rx[NB_PORTS] = { 0 };
+	static uint64_t last_dropped[NB_PORTS] = { 0 };
+	static uint64_t last_duplicated[NB_PORTS] = { 0 };
+	static uint64_t last_time = 0;
 
-	total_packets_dropped = 0;
-	total_packets_tx = 0;
-	total_packets_rx = 0;
-	total_packets_duplicated = 0;
+	uint64_t now = rte_get_timer_cycles();
+
+	// On first call, just record the baseline and return
+	if (last_time == 0) {
+		for (unsigned portid = 0; portid < NB_PORTS; portid++) {
+			last_tx[portid] = port_statistics[portid].tx;
+			last_rx[portid] = port_statistics[portid].rx;
+			last_dropped[portid] = port_statistics[portid].dropped;
+			last_duplicated[portid] = port_statistics[portid].duplicated;
+		}
+		last_time = now;
+		return;
+	}
+
+	double elapsed = (now - last_time) / (double)rte_get_timer_hz();
+
+	uint64_t total_tx = 0, total_rx = 0;
+	uint64_t total_dropped = 0, total_duplicated = 0;
 
 	const char clr[] = { 27, '[', '2', 'J', '\0' };
 	const char topLeft[] = { 27, '[', '1', ';', '1', 'H', '\0' };
-
-	/* Clear screen and move to top left */
 	printf("%s%s", clr, topLeft);
 
 	printf("\nPort statistics ====================================");
 
-	for (portid = 0; portid < NB_PORTS; portid++) {
-		printf("\nStatistics for port %u ------------------------------"
-			   "\nPackets sent: %24" PRIu64 "\nPackets received: %20" PRIu64
-			   "\nPackets dropped: %21" PRIu64 "\nPackets duplicated: %18" PRIu64,
-			   portid, port_statistics[portid].tx, port_statistics[portid].rx,
-			   port_statistics[portid].dropped, port_statistics[portid].duplicated);
+	for (unsigned portid = 0; portid < NB_PORTS; portid++) {
+		uint64_t tx = port_statistics[portid].tx;
+		uint64_t rx = port_statistics[portid].rx;
+		uint64_t drop = port_statistics[portid].dropped;
+		uint64_t dup = port_statistics[portid].duplicated;
 
-		total_packets_dropped += port_statistics[portid].dropped;
-		total_packets_tx += port_statistics[portid].tx;
-		total_packets_rx += port_statistics[portid].rx;
-		total_packets_duplicated += port_statistics[portid].duplicated;
+		double tx_pps = (tx - last_tx[portid]) / elapsed;
+		double rx_pps = (rx - last_rx[portid]) / elapsed;
+		double drop_pps = (drop - last_dropped[portid]) / elapsed;
+		double dup_pps = (dup - last_duplicated[portid]) / elapsed;
+
+		printf("\nStatistics for port %u ------------------------------"
+			   "\nPackets sent:        %20" PRIu64 "  (%10.0f pps)"
+			   "\nPackets received:    %20" PRIu64 "  (%10.0f pps)"
+			   "\nPackets dropped:     %20" PRIu64 "  (%10.0f pps)"
+			   "\nPackets duplicated:  %20" PRIu64 "  (%10.0f pps)",
+			   portid, tx, tx_pps, rx, rx_pps, drop, drop_pps, dup, dup_pps);
+
+		printf("\nRing occupancy:"
+			   "\n  queues[%u]:  %u / %u"
+			   "\n  tx_ring[%u]: %u / %u",
+			   portid, rte_ring_count(queues[portid]->ring), QUEUE_RING_SIZE,
+			   portid, rte_ring_count(tx_ring[portid]), TX_RING_SIZE);
+
+		total_tx += tx;
+		total_rx += rx;
+		total_dropped += drop;
+		total_duplicated += dup;
+
+		last_tx[portid] = tx;
+		last_rx[portid] = rx;
+		last_dropped[portid] = drop;
+		last_duplicated[portid] = dup;
 	}
+
 	printf("\nAggregate statistics ==============================="
-		   "\nTotal packets sent: %18" PRIu64
-		   "\nTotal packets received: %14" PRIu64
-		   "\nTotal packets dropped: %15" PRIu64
-		   "\nTotal packets duplicated: %12" PRIu64,
-		   total_packets_tx, total_packets_rx, total_packets_dropped, total_packets_duplicated);
+		   "\nTotal packets sent:        %15" PRIu64
+		   "\nTotal packets received:    %15" PRIu64
+		   "\nTotal packets dropped:     %15" PRIu64
+		   "\nTotal packets duplicated:  %15" PRIu64,
+		   total_tx, total_rx, total_dropped, total_duplicated);
 	printf("\n====================================================\n");
 
+	last_time = now;
 	fflush(stdout);
 }
 
