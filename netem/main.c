@@ -52,7 +52,7 @@ static uint16_t nb_txd = TX_DESC_DEFAULT;
 /* Number of ports */
 #define NB_PORTS 2
 
-#define NUM_QUEUES 10
+#define NUM_QUEUES 11
 
 typedef struct delayed_t {
 	struct rte_mbuf *m;
@@ -77,8 +77,32 @@ PQ_t pq[NUM_QUEUES];
 typedef struct packet_queue_t {
 	struct rte_ring *ring;
 	struct rte_mempool *item_pool;
-	uint16_t pq_id;
 } packet_queue_t;
+
+#define QUEUE_RING_SIZE 4096
+
+struct packet_queue_t *init_packet_queue(uint16_t id)
+{
+	struct packet_queue_t *queue =
+		rte_zmalloc("PQ_STATE", sizeof(struct packet_queue_t), 0);
+	char name_buf[] = "ring_pq";
+
+    // Initialize lockless ring optimized for Single-Producer / Single-Consumer mapping
+	queue->ring = rte_ring_create(name_buf, QUEUE_RING_SIZE, rte_socket_id(),
+								  RING_F_SP_ENQ | RING_F_SC_DEQ);
+
+	// Initialize an ultra-fast local object cache pool for your custom struct elements
+	char name_buf[] = "pool_pq";
+	queue->item_pool = rte_mempool_create(name_buf, QUEUE_RING_SIZE - 1, sizeof(packet_t),
+                                       0, 0, NULL, NULL, NULL, NULL, 
+                                       rte_socket_id(), 0);
+
+	if (!queue->ring || !queue->item_pool) {
+		rte_exit(EXIT_FAILURE, "Failed to initialize DPDK pipeline rings or pools\n");
+	}
+
+	return queue;
+}
 
 int enqueue_packet(packet_queue_t *queue, rte_mbuf *mbuf, PQ_t pq) {
 	void *msg = NULL;
