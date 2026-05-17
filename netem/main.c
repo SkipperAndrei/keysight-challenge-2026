@@ -81,21 +81,90 @@ typedef struct PQ_t {
 	uint64_t delay_us;
 } PQ_t;
 
-static const PQ_t pq[NUM_QUEUES + 1] = {
-	// Pattern, PQ ID, Drop Rate, Duplicate Rate, Delay (us)
-	{ { 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C },	0, 0, 0, 0 },
-	{ { 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C },	1, 0, 0, 0 },
-	{ { 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C },	2, 0, 0, 0 },
-	{ { 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C },	3, 0, 0, 0 },
-	{ { 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C },	4, 0, 0, 0 },
-	{ { 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C },	5, 0, 0, 0 },
-	{ { 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C },	6, 0, 0, 0 },
-	{ { 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C },	7, 0, 0, 0 },
-	{ { 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C },	8, 0, 0, 0 },
-	{ { 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C },	9, 0, 0, 0 },
+PQ_t pq[NUM_QUEUES + 1];
 
-	{ { 0 }, 														 DEFAULT_PQ_INDEX, .5, .5, 0 } // Default PQ
-};
+int load_pq_config()
+{
+	FILE *f = fopen("config.csv", "r");
+	if (!f) {
+		fprintf(stderr, "Cannot open config file\n");
+		return -1;
+	}
+
+	char line[256];
+	int count = 0;
+
+	// Skip header line
+	if (!fgets(line, sizeof(line), f)) {
+		fprintf(stderr, "Empty config file\n");
+		fclose(f);
+		return -1;
+	}
+
+	while (fgets(line, sizeof(line), f) && count <= NUM_QUEUES) {
+		// Strip newline
+		line[strcspn(line, "\n")] = '\0';
+
+		// Skip blank lines and comments
+		if (line[0] == '\0' || line[0] == '#')
+			continue;
+
+		PQ_t entry;
+		memset(&entry, 0, sizeof(entry));
+
+		// Split pattern field from the rest
+		char *comma = strchr(line, ',');
+		if (!comma) {
+			fprintf(stderr, "Bad line %d: %s\n", count + 2, line);
+			fclose(f);
+			return -1;
+		}
+		*comma = '\0';
+		char *pattern_str = line;
+		char *rest = comma + 1;
+
+		// Parse remaining fields: pq_id, drop_rate, dup_rate, delay_us
+		unsigned int pq_id;
+		if (sscanf(rest, "%u,%lf,%lf,%lu", &pq_id, &entry.drop_rate,
+				   &entry.double_rate, &entry.delay_us) != 4) {
+			fprintf(stderr, "Bad fields on line %d: %s\n", count + 2, rest);
+			fclose(f);
+			return -1;
+		}
+		entry.pq_id = (uint8_t)pq_id;
+
+		// Parse pattern
+		if (strncmp(pattern_str, "default", 7) == 0) {
+			memset(entry.pattern, 0, PATTERN_SIZE);
+		} else {
+			unsigned int b[PATTERN_SIZE];
+			if (sscanf(pattern_str,
+					   "%02x:%02x:%02x:%02x:%02x:%02x:"
+					   "%02x:%02x:%02x:%02x:%02x:%02x",
+					   &b[0], &b[1], &b[2], &b[3], &b[4], &b[5], &b[6], &b[7],
+					   &b[8], &b[9], &b[10], &b[11]) != PATTERN_SIZE) {
+				fprintf(stderr, "Bad pattern on line %d: %s\n", count + 2,
+						pattern_str);
+				fclose(f);
+				return -1;
+			}
+			for (int i = 0; i < PATTERN_SIZE; i++)
+				entry.pattern[i] = (unsigned char)b[i];
+		}
+
+		pq[count++] = entry;
+	}
+
+	fclose(f);
+
+	if (count != NUM_QUEUES + 1) {
+		fprintf(stderr, "Expected %d entries, got %d\n", NUM_QUEUES + 1, count);
+		return -1;
+	}
+
+	printf("Loaded %d PQ entries from config.csv\n", count);
+	return 0;
+}
 
 typedef struct packet_queue_t {
 	struct rte_ring *ring;
@@ -470,8 +539,10 @@ int main(int argc, char **argv)
 	unsigned int nb_lcores = 2;
 	unsigned int nb_mbufs;
 
-	/* Init EAL */
-	ret = rte_eal_init(argc, argv);
+	load_pq_config();
+
+		/* Init EAL */
+		ret = rte_eal_init(argc, argv);
 	if (ret < 0)
 		rte_exit(EXIT_FAILURE, "Invalid EAL arguments\n");
 	argc -= ret;

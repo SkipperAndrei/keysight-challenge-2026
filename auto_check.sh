@@ -2,6 +2,7 @@
 
 cp netem/main.c setup/main.c
 cp netem/run.sh setup/run.sh
+cp netem/config.csv setup/config.csv
 
 cd setup
 ./stop_container.sh

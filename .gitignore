@@ -3,3 +3,4 @@
 .vscode/launch.json
 setup/main.c
 setup/run.sh
+setup/config.csv
