@@ -81,21 +81,70 @@ typedef struct PQ_t {
 	uint64_t delay_us;
 } PQ_t;
 
-
 static const PQ_t pq[NUM_QUEUES + 1] = {
-    // Pattern, PQ ID, Drop Rate, Duplicate Rate, Delay (us)
-    {{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C}, 0, 0, 0, 0},
-    {{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C}, 1, 0, 0, 0},
-    {{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C}, 2, 0, 0, 0},
-	{{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C}, 3, 0, 0, 0},
-	{{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C}, 4, 0, 0, 0},
-	{{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C}, 5, 0, 0, 0},
-    {{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C}, 6, 0, 0, 0},
-    {{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C}, 7, 0, 0, 0},
-	{{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C}, 8, 0, 0, 0},
-	{{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C}, 9, 0, 0, 0},
-    
-    {{0}, DEFAULT_PQ_INDEX, 0, 0, 0} // Default PQ
+	// Pattern, PQ ID, Drop Rate, Duplicate Rate, Delay (us)
+	{ { 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B,
+		0x0C },
+	  0,
+	  0,
+	  0,
+	  0 },
+	{ { 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B,
+		0x0C },
+	  1,
+	  0,
+	  0,
+	  0 },
+	{ { 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B,
+		0x0C },
+	  2,
+	  0,
+	  0,
+	  0 },
+	{ { 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B,
+		0x0C },
+	  3,
+	  0,
+	  0,
+	  0 },
+	{ { 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B,
+		0x0C },
+	  4,
+	  0,
+	  0,
+	  0 },
+	{ { 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B,
+		0x0C },
+	  5,
+	  0,
+	  0,
+	  0 },
+	{ { 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B,
+		0x0C },
+	  6,
+	  0,
+	  0,
+	  0 },
+	{ { 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B,
+		0x0C },
+	  7,
+	  0,
+	  0,
+	  0 },
+	{ { 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B,
+		0x0C },
+	  8,
+	  0,
+	  0,
+	  0 },
+	{ { 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B,
+		0x0C },
+	  9,
+	  0,
+	  0,
+	  0 },
+
+	{ { 0 }, DEFAULT_PQ_INDEX, 0, 0, 0 } // Default PQ
 };
 
 typedef struct packet_queue_t {
@@ -229,16 +278,15 @@ static inline uint8_t classify_packet_to_config_idx(struct rte_mbuf *m)
 				pkt_low == pattern_low) {
 				return pq[p].pq_id;
 			}
-			}
+		}
 	}
 
 	return DEFAULT_PQ_INDEX; // Fallback profile index
 }
 
-void worker_process_packet(void *args)
+void worker_process_packet(int queue_id)
 {
 	uint8_t nb_packets_in_queue = 0;
-	int queue_id = *(int *)args;
 	uint8_t nb_tx_worker = 0;
 	PQ_t pq_info;
 
@@ -249,13 +297,15 @@ void worker_process_packet(void *args)
 	// If your launch arguments include a thread index, use that. Otherwise, map via lcore configuration.
 	unsigned int tx_queue_id = rte_lcore_index(my_lcore) - 1;
 
-	struct rte_eth_dev_tx_buffer *buffer = per_core_tx_buffer[my_lcore][tx_port_id];
+	struct rte_eth_dev_tx_buffer *buffer =
+		per_core_tx_buffer[my_lcore][tx_port_id];
 	packet_queue_t *queue = queues[queue_id];
 
 	while (!force_quit) {
 		struct packet_t *pkts_burst[MAX_PKT_BURST];
 
-		nb_packets_in_queue = rte_ring_dequeue_burst(queue->ring, (void **)pkts_burst, MAX_PKT_BURST, NULL);
+		nb_packets_in_queue = rte_ring_dequeue_burst(
+			queue->ring, (void **)pkts_burst, MAX_PKT_BURST, NULL);
 
 		if (unlikely(nb_packets_in_queue == 0))
 			continue;
@@ -265,8 +315,8 @@ void worker_process_packet(void *args)
 			pq_info = pq[pkt->pq_id];
 
 			rte_prefetch0(rte_pktmbuf_mtod(pkt->m, void *));
-
-			if (pkt->send_time + US_TO_CYCLES(pq_info.delay_us) > rte_rdtsc()) {
+			if (pq_info.delay_us > 0 &&
+				pkt->send_time + US_TO_CYCLES(pq_info.delay_us) > rte_rdtsc()) {
 				rte_ring_enqueue(queue->ring, pkt);
 				continue;
 			}
@@ -287,8 +337,10 @@ void worker_process_packet(void *args)
 				}
 			}
 
-			int sent = rte_eth_tx_buffer(tx_port_id, tx_queue_id, buffer, pkt->m);
-			if (sent) port_statistics[tx_port_id].tx += sent;
+			int sent =
+				rte_eth_tx_buffer(tx_port_id, tx_queue_id, buffer, pkt->m);
+			if (sent)
+				port_statistics[tx_port_id].tx += sent;
 
 			// Free the metadata wrapper wrapper back to its pool
 			rte_mempool_put(queue->item_pool, pkt);
@@ -296,10 +348,8 @@ void worker_process_packet(void *args)
 	}
 }
 
-void producer(void *args)
+void producer(int rx_port_id)
 {
-	int rx_port_id = *((int *)args);
-
 	while (!force_quit) {
 		struct rte_mbuf *pkts_burst[MAX_PKT_BURST];
 		unsigned nb_rx =
@@ -363,10 +413,15 @@ static void print_stats(void)
 /* main processing loop */
 static void netem_main_loop(void)
 {
+	struct rte_mbuf *pkts_burst[MAX_PKT_BURST];
+	struct rte_mbuf *m;
+	int sent;
 	unsigned lcore_id;
 	uint64_t prev_tsc, diff_tsc, cur_tsc, timer_tsc;
+	unsigned i, nb_rx;
 	const uint64_t drain_tsc =
 		(rte_get_tsc_hz() + US_PER_S - 1) / US_PER_S * BURST_TX_DRAIN_US;
+	struct rte_eth_dev_tx_buffer *buffer;
 
 	prev_tsc = 0;
 	timer_tsc = 0;
@@ -395,7 +450,11 @@ static void netem_main_loop(void)
 
 		diff_tsc = cur_tsc - prev_tsc;
 		if (unlikely(diff_tsc > drain_tsc)) {
-			
+			buffer = tx_buffer[tx_port_id];
+
+			sent = rte_eth_tx_buffer_flush(tx_port_id, 0, buffer);
+			if (sent)
+				port_statistics[tx_port_id].tx += sent;
 
 			/* if timer is enabled */
 			if (timer_period > 0) {
@@ -426,11 +485,9 @@ static int netem_launch_one_lcore(__rte_unused void *dummy)
 	if (lcore_idx == 0) {
 		netem_main_loop();
 	} else if (lcore_idx < 3) {
-		int queue_id = lcore_idx - 1;
-		producer(&queue_id);
+		producer(lcore_idx - 1);
 	} else {
-		int queue_id = lcore_idx % 2;
-		worker_process_packet(&queue_id);
+		worker_process_packet(lcore_idx % 2);
 	}
 
 	return 0;
@@ -565,26 +622,30 @@ int main(int argc, char **argv)
 
 		/* Initialize TX buffers */
 		unsigned int worker_idx = 0;
-        RTE_LCORE_FOREACH_WORKER(lcore) {
-            
-            per_core_tx_buffer[lcore][portid] = rte_zmalloc_socket(
-                "tx_buffer", RTE_ETH_TX_BUFFER_SIZE(MAX_PKT_BURST), 0,
-                rte_eth_dev_socket_id(portid));
-                
-            if (per_core_tx_buffer[lcore][portid] == NULL)
-                rte_exit(EXIT_FAILURE, "Cannot allocate buffer for lcore %u on port %u\n", lcore, portid);
+		RTE_LCORE_FOREACH_WORKER(lcore)
+		{
+			per_core_tx_buffer[lcore][portid] = rte_zmalloc_socket(
+				"tx_buffer", RTE_ETH_TX_BUFFER_SIZE(MAX_PKT_BURST), 0,
+				rte_eth_dev_socket_id(portid));
 
-            rte_eth_tx_buffer_init(per_core_tx_buffer[lcore][portid], MAX_PKT_BURST);
+			if (per_core_tx_buffer[lcore][portid] == NULL)
+				rte_exit(EXIT_FAILURE,
+						 "Cannot allocate buffer for lcore %u on port %u\n",
+						 lcore, portid);
 
-            // Dynamically link error drops to this port's statistics
-            ret = rte_eth_tx_buffer_set_err_callback(
-                per_core_tx_buffer[lcore][portid], 
-                rte_eth_tx_buffer_count_callback,
-                &port_statistics[portid].dropped);
-                
-            if (ret < 0)
-                rte_exit(EXIT_FAILURE, "Cannot set error callback on port %u\n", portid);
-        }
+			rte_eth_tx_buffer_init(per_core_tx_buffer[lcore][portid],
+								   MAX_PKT_BURST);
+
+			// Dynamically link error drops to this port's statistics
+			ret = rte_eth_tx_buffer_set_err_callback(
+				per_core_tx_buffer[lcore][portid],
+				rte_eth_tx_buffer_count_callback,
+				&port_statistics[portid].dropped);
+
+			if (ret < 0)
+				rte_exit(EXIT_FAILURE, "Cannot set error callback on port %u\n",
+						 portid);
+		}
 
 		ret = rte_eth_dev_set_ptypes(portid, RTE_PTYPE_UNKNOWN, NULL, 0);
 		if (ret < 0)

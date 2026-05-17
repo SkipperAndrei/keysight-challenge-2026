@@ -284,10 +284,9 @@ static inline uint8_t classify_packet_to_config_idx(struct rte_mbuf *m)
 	return DEFAULT_PQ_INDEX; // Fallback profile index
 }
 
-void worker_process_packet(void *args)
+void worker_process_packet(int queue_id)
 {
 	uint8_t nb_packets_in_queue = 0;
-	int queue_id = *(int *)args;
 	uint8_t nb_tx_worker = 0;
 	PQ_t pq_info;
 
@@ -316,8 +315,8 @@ void worker_process_packet(void *args)
 			pq_info = pq[pkt->pq_id];
 
 			rte_prefetch0(rte_pktmbuf_mtod(pkt->m, void *));
-
-			if (pkt->send_time + US_TO_CYCLES(pq_info.delay_us) > rte_rdtsc()) {
+			if (pq_info.delay_us > 0 &&
+				pkt->send_time + US_TO_CYCLES(pq_info.delay_us) > rte_rdtsc()) {
 				rte_ring_enqueue(queue->ring, pkt);
 				continue;
 			}
@@ -349,10 +348,8 @@ void worker_process_packet(void *args)
 	}
 }
 
-void producer(void *args)
+void producer(int rx_port_id)
 {
-	int rx_port_id = *((int *)args);
-
 	while (!force_quit) {
 		struct rte_mbuf *pkts_burst[MAX_PKT_BURST];
 		unsigned nb_rx =
@@ -416,10 +413,15 @@ static void print_stats(void)
 /* main processing loop */
 static void netem_main_loop(void)
 {
+	struct rte_mbuf *pkts_burst[MAX_PKT_BURST];
+	struct rte_mbuf *m;
+	int sent;
 	unsigned lcore_id;
 	uint64_t prev_tsc, diff_tsc, cur_tsc, timer_tsc;
+	unsigned i, nb_rx;
 	const uint64_t drain_tsc =
 		(rte_get_tsc_hz() + US_PER_S - 1) / US_PER_S * BURST_TX_DRAIN_US;
+	struct rte_eth_dev_tx_buffer *buffer;
 
 	prev_tsc = 0;
 	timer_tsc = 0;
@@ -448,6 +450,12 @@ static void netem_main_loop(void)
 
 		diff_tsc = cur_tsc - prev_tsc;
 		if (unlikely(diff_tsc > drain_tsc)) {
+			buffer = tx_buffer[tx_port_id];
+
+			sent = rte_eth_tx_buffer_flush(tx_port_id, 0, buffer);
+			if (sent)
+				port_statistics[tx_port_id].tx += sent;
+
 			/* if timer is enabled */
 			if (timer_period > 0) {
 				/* advance the timer */
@@ -477,11 +485,9 @@ static int netem_launch_one_lcore(__rte_unused void *dummy)
 	if (lcore_idx == 0) {
 		netem_main_loop();
 	} else if (lcore_idx < 3) {
-		int queue_id = lcore_idx - 1;
-		producer(&queue_id);
+		producer(lcore_idx - 1);
 	} else {
-		int queue_id = lcore_idx % 2;
-		worker_process_packet(&queue_id);
+		worker_process_packet(lcore_idx % 2);
 	}
 
 	return 0;
