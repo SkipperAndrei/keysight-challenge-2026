@@ -40,6 +40,7 @@ static volatile bool force_quit;
 #define MAX_PKT_BURST 32
 #define BURST_TX_DRAIN_US 100 /* TX drain every ~100us */
 #define MEMPOOL_CACHE_SIZE 256
+#define DELAY_BUF_SIZE 1024
 
 /*
  * Configurable number of RX/TX ring descriptors
@@ -75,7 +76,6 @@ typedef struct PQ_t {
 	uint64_t delay_us;
 } PQ_t;
 
-PQ_t pq[NUM_QUEUES];
 
 static const PQ_t pq[NUM_QUEUES + 1] = {
     // Pattern, PQ ID, Drop Rate, Duplicate Rate, Delay (us)
@@ -184,6 +184,51 @@ static inline uint8_t classify_packet_to_config_idx(struct rte_mbuf *m)
 	}
 
     return DEFAULT_PQ_INDEX; // Fallback profile index
+}
+
+
+void worker_process_packet(void *args) {
+
+	uint8_t nb_packets_in_queue = 0;
+	delayed_t delay_buffer[DELAY_BUF_SIZE];
+	uint16_t read_idx = 0, write_idx = 0;
+	PQ_t pq_info;
+	while (!force_quit) {
+		for (int q = 0; q < NUM_QUEUES + 1; q++) {
+			struct rte_mbuf *pkts_burst[MAX_PKT_BURST];
+			// Todo: Change packet_queues name after vlad commits
+			nb_packets_in_queue = rte_ring_dequeue_burst(packet_queues[q].ring, (void **)pkts_burst, MAX_PKT_BURST);
+
+			if (unlikely(nb_packets_in_queue == 0))
+				continue;
+			
+			pq_info = pq[q];
+
+			if (pq_info.drop_rate > 0) {
+				for (uint8_t i = 0; i < nb_packets_in_queue; i++) {
+					if (rte_rand() / (double)UINT32_MAX < pq_info.drop_rate) {
+						rte_pktmbuf_free(pkts_burst[i]);
+						continue;
+					}
+				}
+			}
+
+			if (pq_info.double_rate > 0) {
+				for (uint8_t i = 0; i < nb_packets_in_queue; i++) {
+					if (rte_rand() / (double)UINT32_MAX < pq_info.double_rate) {
+						// Enqueue a duplicate of the packet
+						struct rte_mbuf *dup_pkt = rte_pktmbuf_clone(pkts_burst[i], netem_pktmbuf_pool);
+						if (dup_pkt != NULL) {
+							enqueue_packet(&packet_queues[q], dup_pkt, pq_info);
+						} else {
+							RTE_LOG(WARNING, NETEM, "Failed to clone packet for doubling in PQ %u\n", pq_info.pq_id);
+						}
+
+					}
+				}
+			}			
+		}
+	}
 }
 
 /* ethernet addresses of ports */
