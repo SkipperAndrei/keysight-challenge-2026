@@ -249,9 +249,10 @@ void worker_process_packet(void *args)
 			continue;
 
 		for (uint8_t i = 0; i < nb_packets_in_queue; i++) {
-			rte_prefetch0(rte_pktmbuf_mtod(pkts_burst[i], void *));
 			struct packet_t *pkt = pkts_burst[i];
 			pq_info = pq[pkt->pq_id];
+			
+			rte_prefetch0(rte_pktmbuf_mtod(pkt->m, void *));
 
 			if (pkt->send_time + US_TO_CYCLES(pq_info.delay_us) > rte_rdtsc()) {
 				rte_ring_enqueue(queue->ring, pkt);
