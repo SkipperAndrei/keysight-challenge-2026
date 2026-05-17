@@ -239,6 +239,8 @@ void worker_process_packet(void *args)
 {
 	uint8_t nb_packets_in_queue = 0;
 	int queue_id = *(int *)args;
+	uint8_t nb_tx_worker = 0;
+	int queue_id = *(int *)args; // 0 for receiver, 1 for transmitter
 	PQ_t pq_info;
 
 	int tx_port_id = queue_id ^ 1;
@@ -254,8 +256,7 @@ void worker_process_packet(void *args)
 	while (!force_quit) {
 		struct packet_t *pkts_burst[MAX_PKT_BURST];
 
-		nb_packets_in_queue = rte_ring_dequeue_burst(
-			queue->ring, (void **)pkts_burst, MAX_PKT_BURST);
+		nb_packets_in_queue = rte_ring_dequeue_burst(queue->ring, (void **)pkts_burst, MAX_PKT_BURST);
 
 		if (unlikely(nb_packets_in_queue == 0))
 			continue;
@@ -281,6 +282,7 @@ void worker_process_packet(void *args)
 			if (pq_info.double_rate > 0 &&
 				rte_rand() / (double)UINT32_MAX < pq_info.double_rate) {
 				struct rte_mbuf *dup_pkt =
+					rte_pktmbuf_clone(pkt->m, netem_pktmbuf_pool);
 					rte_pktmbuf_clone(pkt->m, netem_pktmbuf_pool);
 				if (dup_pkt != NULL) {
 					enqueue_packet(dup_pkt, pq_info, queue);
@@ -312,7 +314,7 @@ void producer(void *args)
 		port_statistics[rx_port_id].rx += nb_rx;
 
 		for (int i = 0; i < nb_rx; i++) {
-			rte_prefetch0(rte_pktmbuf_mtod(pkts_burst[i], void *));
+			rte_prefetch0(rte_pktmbuf_mtod(pkts_burst[i]->m, void *));
 			struct rte_mbuf *m = pkts_burst[i];
 
 			uint8_t pq_idx = classify_packet_to_config_idx(m);
