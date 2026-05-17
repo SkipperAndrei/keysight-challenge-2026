@@ -196,6 +196,7 @@ static inline uint8_t classify_packet_to_config_idx(struct rte_mbuf *m)
 void worker_process_packet(void *args) {
 	uint8_t nb_packets_in_queue = 0;
 	uint8_t valid_count = 0;
+	uint8_t nb_tx_worker = 0;
 	int queue_id = *(int *)args; // 0 for receiver, 1 for transmitter
 	PQ_t pq_info;
 
@@ -244,6 +245,21 @@ void worker_process_packet(void *args) {
             // 6. Free the metadata wrapper back to its pool
             rte_mempool_put(queue->item_pool, pkt);
 		}
+
+		if (valid_count > 0) {
+			// For example, if this is the transmitter worker, send out the valid packets
+			if (queue_type == 1) {
+				nb_tx_worker = rte_eth_tx_burst(1, 0, pkts_burst, valid_count);
+			} else {
+				nb_tx_worker = rte_eth_tx_burst(0, 1, pkts_burst, valid_count);
+			}
+
+			if (unlikely(nb_tx_worker < valid_count)) {
+				for (uint8_t i = nb_tx_worker; i < valid_count; i++) {
+					rte_pktmbuf_free(pkts_burst[i]);
+				}
+			}
+		}
 	}
 }
 
@@ -266,7 +282,7 @@ void producer(void *args) {
 
 			uint8_t pq_idx = classify_packet_to_config_idx(m);
 			enqueue_packet(m, pq[pq_idx], queues[rx_port_id]);
-		}
+		}		
 	}
 }
 
