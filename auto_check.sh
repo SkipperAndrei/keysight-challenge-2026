@@ -7,4 +7,4 @@ cd setup
 ./stop_container.sh
 ./start-container.sh
 CONTAINER_ID=$(docker ps --format "{{.ID}}" | head -n 1)
-docker exec -it "$CONTAINER_ID" /bin/bash
+docker exec -u root "$CONTAINER_ID" /bin/bash -c "cd challenge-app/netem && chmod +x run.sh && ./run.sh"
