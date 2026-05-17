@@ -106,32 +106,57 @@ typedef struct packet_queue_t {
 #define QUEUE_RING_SIZE 4096
 packet_queue_t *queues[2];
 
+/* ethernet addresses of ports */
+static struct rte_ether_addr netem_ports_eth_addr[NB_PORTS];
+
+static struct rte_eth_dev_tx_buffer *tx_buffer[NB_PORTS];
+
+static struct rte_eth_conf port_conf = {
+	.txmode = {
+		.mq_mode = RTE_ETH_MQ_TX_NONE,
+	},
+};
+
+struct rte_mempool *netem_pktmbuf_pool = NULL;
+
+/* Per-port statistics struct */
+struct __rte_cache_aligned netem_port_statistics {
+	uint64_t tx;
+	uint64_t rx;
+	uint64_t dropped;
+};
+struct netem_port_statistics port_statistics[NB_PORTS];
+
+/* A tsc-based timer responsible for triggering statistics printout */
+static uint64_t timer_period = 1; /* default period is 1 seconds */
+
 packet_queue_t *init_packet_queue(int queue_id)
 {
 	packet_queue_t *queue =
 		rte_zmalloc("PQ_STATE", sizeof(struct packet_queue_t), 0);
 	char name_buf[20];
 
-    // Initialize lockless ring optimized for Single-Producer / Single-Consumer mapping
+	// Initialize lockless ring optimized for Single-Producer / Single-Consumer mapping
 	sprintf(name_buf, "ring_pq_%d", queue_id);
 	queue->ring = rte_ring_create(name_buf, QUEUE_RING_SIZE, rte_socket_id(),
 								  RING_F_SP_ENQ | RING_F_SC_DEQ);
 
 	// Initialize an ultra-fast local object cache pool for your custom struct elements
 	sprintf(name_buf, "pool_pq_%d", queue_id);
-	queue->item_pool = rte_mempool_create(name_buf, QUEUE_RING_SIZE - 1, sizeof(packet_t),
-                                       0, 0, NULL, NULL, NULL, NULL, 
-                                       rte_socket_id(), 0);
+	queue->item_pool = rte_mempool_create(name_buf, QUEUE_RING_SIZE - 1,
+										  sizeof(packet_t), 0, 0, NULL, NULL,
+										  NULL, NULL, rte_socket_id(), 0);
 
 	if (!queue->ring || !queue->item_pool) {
-		rte_exit(EXIT_FAILURE, "Failed to initialize DPDK pipeline rings or pools\n");
+		rte_exit(EXIT_FAILURE,
+				 "Failed to initialize DPDK pipeline rings or pools\n");
 	}
 
 	return queue;
 }
 
-int enqueue_packet(rte_mbuf *mbuf, PQ_t pq, packet_queue_t* queue)
-{	
+int enqueue_packet(rte_mbuf *mbuf, PQ_t pq, packet_queue_t *queue)
+{
 	void *msg = NULL;
 	packet_t *pkt;
 
@@ -155,7 +180,8 @@ int enqueue_packet(rte_mbuf *mbuf, PQ_t pq, packet_queue_t* queue)
 	return 0;
 }
 
-int dequeue_packet(packet_t **pkt, int queue_id, packet_queue_t* queue) {
+int dequeue_packet(packet_t **pkt, int queue_id, packet_queue_t *queue)
+{
 	void *msg = NULL;
 
 	if (rte_ring_dequeue(queue->ring, &msg) < 0) {
@@ -169,20 +195,20 @@ int dequeue_packet(packet_t **pkt, int queue_id, packet_queue_t* queue) {
 
 static inline uint8_t classify_packet_to_config_idx(struct rte_mbuf *m)
 {
-    uint8_t *pkt_data = rte_pktmbuf_mtod(m, uint8_t *);
-    uint32_t pkt_len = rte_pktmbuf_data_len(m);
+	uint8_t *pkt_data = rte_pktmbuf_mtod(m, uint8_t *);
+	uint32_t pkt_len = rte_pktmbuf_data_len(m);
 
-    if (unlikely(pkt_len < PATTERN_SIZE)) {
-        return DEFAULT_PQ_INDEX;
-    }
+	if (unlikely(pkt_len < PATTERN_SIZE)) {
+		return DEFAULT_PQ_INDEX;
+	}
 
-    uint32_t scan_limit = pkt_len - PATTERN_SIZE + 1;
+	uint32_t scan_limit = pkt_len - PATTERN_SIZE + 1;
 
-    // Slide across the packet bytes
-    for (uint32_t i = 0; i < scan_limit; i++) {
-        uint8_t *current_window = &pkt_data[i];
+	// Slide across the packet bytes
+	for (uint32_t i = 0; i < scan_limit; i++) {
+		uint8_t *current_window = &pkt_data[i];
 
-        // Match against your 10 custom patterns
+		// Match against your 10 custom patterns
 		for (uint8_t p = 0; p < NUM_QUEUES; p++) {
 			if (memcmp(current_window, pq[p].pattern, PATTERN_SIZE) == 0) {
 				return p; // Return index of the matched configuration profile
@@ -190,10 +216,11 @@ static inline uint8_t classify_packet_to_config_idx(struct rte_mbuf *m)
 		}
 	}
 
-    return DEFAULT_PQ_INDEX; // Fallback profile index
+	return DEFAULT_PQ_INDEX; // Fallback profile index
 }
 
-void worker_process_packet(void *args) {
+void worker_process_packet(void *args)
+{
 	uint8_t nb_packets_in_queue = 0;
 	uint8_t valid_count = 0;
 	uint8_t nb_tx_worker = 0;
@@ -220,35 +247,41 @@ void worker_process_packet(void *args) {
 			struct packet_t *pkt = pkts_burst[i];
 			pq_info = pq[pkt->pq_id];
 
-			if (pkt->send_time + US_TO_CYCLES(pq_info.delay_us) > rte_rdtsc()) { 
+			if (pkt->send_time + US_TO_CYCLES(pq_info.delay_us) > rte_rdtsc()) {
 				rte_ring_enqueue(queue->ring, pkt);
 				continue;
 			}
 
-			if (pq_info.drop_rate > 0 && rte_rand() / (double)UINT32_MAX < pq_info.drop_rate) {
+			if (pq_info.drop_rate > 0 &&
+				rte_rand() / (double)UINT32_MAX < pq_info.drop_rate) {
 				rte_pktmbuf_free(pkt);
 				continue;
 			}
 
-			if (pq_info.double_rate > 0 && rte_rand() / (double)UINT32_MAX < pq_info.double_rate) {
-				struct rte_mbuf *dup_pkt = rte_pktmbuf_clone(pkt, netem_pktmbuf_pool);
+			if (pq_info.double_rate > 0 &&
+				rte_rand() / (double)UINT32_MAX < pq_info.double_rate) {
+				struct rte_mbuf *dup_pkt =
+					rte_pktmbuf_clone(pkt, netem_pktmbuf_pool);
 				if (dup_pkt != NULL) {
 					enqueue_packet(dup_pkt, pq_info, queue);
 				} else {
-					RTE_LOG(WARNING, NETEM, "Failed to clone packet for doubling in PQ %u\n", pq_info.pq_id);
+					RTE_LOG(WARNING, NETEM,
+							"Failed to clone packet for doubling in PQ %u\n",
+							pq_info.pq_id);
 				}
 			}
 
 			int sent = rte_eth_tx_buffer(tx_port_id, 0, buffer, pkt->m);
-			if (sent) port_statistics[tx_port_id].tx += sent;
+			if (sent)
+				port_statistics[tx_port_id].tx += sent;
 
-            // 6. Free the metadata wrapper back to its pool
-            rte_mempool_put(queue->item_pool, pkt);
+			// 6. Free the metadata wrapper back to its pool
+			rte_mempool_put(queue->item_pool, pkt);
 		}
 
 		if (valid_count > 0) {
 			// For example, if this is the transmitter worker, send out the valid packets
-			if (queue_type == 1) {
+			if (queue_id == 1) {
 				nb_tx_worker = rte_eth_tx_burst(1, 0, pkts_burst, valid_count);
 			} else {
 				nb_tx_worker = rte_eth_tx_burst(0, 1, pkts_burst, valid_count);
@@ -263,12 +296,14 @@ void worker_process_packet(void *args) {
 	}
 }
 
-void producer(void *args) {
+void producer(void *args)
+{
 	int rx_port_id = *((int *)args);
 
 	while (!force_quit) {
 		struct rte_mbuf *pkts_burst[MAX_PKT_BURST];
-		unsigned nb_rx = rte_eth_rx_burst(rx_port_id, 0, pkts_burst, MAX_PKT_BURST);
+		unsigned nb_rx =
+			rte_eth_rx_burst(rx_port_id, 0, pkts_burst, MAX_PKT_BURST);
 
 		if (unlikely(nb_rx == 0))
 			/*  Nothing received? Continue. */
@@ -282,33 +317,9 @@ void producer(void *args) {
 
 			uint8_t pq_idx = classify_packet_to_config_idx(m);
 			enqueue_packet(m, pq[pq_idx], queues[rx_port_id]);
-		}		
+		}
 	}
 }
-
-/* ethernet addresses of ports */
-static struct rte_ether_addr netem_ports_eth_addr[NB_PORTS];
-
-static struct rte_eth_dev_tx_buffer *tx_buffer[NB_PORTS];
-
-static struct rte_eth_conf port_conf = {
-	.txmode = {
-		.mq_mode = RTE_ETH_MQ_TX_NONE,
-	},
-};
-
-struct rte_mempool *netem_pktmbuf_pool = NULL;
-
-/* Per-port statistics struct */
-struct __rte_cache_aligned netem_port_statistics {
-	uint64_t tx;
-	uint64_t rx;
-	uint64_t dropped;
-};
-struct netem_port_statistics port_statistics[NB_PORTS];
-
-/* A tsc-based timer responsible for triggering statistics printout */
-static uint64_t timer_period = 1; /* default period is 1 seconds */
 
 /* Print out statistics on packets dropped */
 static void print_stats(void)
