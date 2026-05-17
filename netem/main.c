@@ -60,12 +60,6 @@ static uint16_t nb_txd = TX_DESC_DEFAULT;
 #define PATTERN_SIZE 12
 #define DEFAULT_PQ_INDEX NUM_QUEUES
 
-typedef struct delayed_t {
-	struct rte_mbuf *m;
-	uint64_t send_time;
-	uint64_t delay_us;
-} delayed_t;
-
 typedef struct packet_t {
 	struct rte_mbuf *m;
 	uint8_t pq_id;
