@@ -52,7 +52,9 @@ static uint16_t nb_txd = TX_DESC_DEFAULT;
 /* Number of ports */
 #define NB_PORTS 2
 
-#define NUM_QUEUES 11
+#define NUM_QUEUES 10
+#define PATTERN_SIZE 12
+#define DEFAULT_PQ_INDEX NUM_QUEUES + 1
 
 typedef struct delayed_t {
 	struct rte_mbuf *m;
@@ -66,6 +68,7 @@ typedef struct packet_t {
 } packet_t;
 
 typedef struct PQ_t {
+	unsigned char pattern[PATTERN_SIZE];
 	uint8_t pq_id;
 	double drop_rate;
 	double double_rate;
@@ -73,6 +76,22 @@ typedef struct PQ_t {
 } PQ_t;
 
 PQ_t pq[NUM_QUEUES];
+
+static const PQ_t pq[NUM_QUEUES + 1] = {
+    // Pattern, PQ ID, Drop Rate, Duplicate Rate, Delay (us)
+    {{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C}, 0, 0, 0, 0},
+    {{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C}, 1, 0, 0, 0},
+    {{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C}, 1, 0, 0, 0},
+	{{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C}, 1, 0, 0, 0},
+	{{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C}, 1, 0, 0, 0},
+	{{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C}, 0, 0, 0, 0},
+    {{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C}, 1, 0, 0, 0},
+    {{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C}, 1, 0, 0, 0},
+	{{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C}, 1, 0, 0, 0},
+	{{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C}, 1, 0, 0, 0},
+    
+    {{0}, 11, 0, 0, 0} // Default PQ
+};
 
 typedef struct packet_queue_t {
 	struct rte_ring *ring;
@@ -138,6 +157,32 @@ int dequeue_packet(packet_queue_t *queue, packet_t **pkt) {
 
 	*pkt = (packet_t *)msg;
 	return 0;
+}
+
+static inline uint8_t classify_packet_to_config_idx(struct rte_mbuf *m)
+{
+    uint8_t *pkt_data = rte_pktmbuf_mtod(m, uint8_t *);
+    uint32_t pkt_len = rte_pktmbuf_data_len(m);
+
+    if (unlikely(pkt_len < PATTERN_SIZE)) {
+        return DEFAULT_PQ_INDEX;
+    }
+
+    uint32_t scan_limit = pkt_len - PATTERN_SIZE + 1;
+
+    // Slide across the packet bytes
+    for (uint32_t i = 0; i < scan_limit; i++) {
+        uint8_t *current_window = &pkt_data[i];
+
+        // Match against your 10 custom patterns
+		for (uint8_t p = 0; p < NUM_QUEUES; p++) {
+			if (memcmp(current_window, pq[p].pattern, PATTERN_SIZE) == 0) {
+				return p; // Return index of the matched configuration profile
+			}
+		}
+	}
+
+    return DEFAULT_PQ_INDEX; // Fallback profile index
 }
 
 /* ethernet addresses of ports */
