@@ -199,10 +199,13 @@ void worker_process_packet(void *args) {
 	int queue_id = *(int *)args; // 0 for receiver, 1 for transmitter
 	PQ_t pq_info;
 
+	int tx_port_id = queue_id ^ 1; // Transmit to the opposite port
+	struct rte_eth_dev_tx_buffer *buffer = tx_buffer[tx_port_id];
+
 	packet_queue_t *queue = queues[queue_id];
 
 	while (!force_quit) {
-		struct rte_mbuf *pkts_burst[MAX_PKT_BURST];
+		struct packet_t *pkts_burst[MAX_PKT_BURST];
 
 		nb_packets_in_queue = rte_ring_dequeue_burst(
 			queue->ring, (void **)pkts_burst, MAX_PKT_BURST);
@@ -213,21 +216,21 @@ void worker_process_packet(void *args) {
 
 		for (uint8_t i = 0; i < nb_packets_in_queue; i++) {
 			rte_prefetch0(rte_pktmbuf_mtod(pkts_burst[i], void *));
-			struct packet_t *m = pkts_burst[i];
-			pq_info = pq[m->pq_id];
+			struct packet_t *pkt = pkts_burst[i];
+			pq_info = pq[pkt->pq_id];
 
-			if (m->send_time + US_TO_CYCLES(pq_info.delay_us) > rte_rdtsc()) { 
-				rte_ring_enqueue(queue->ring, m);
+			if (pkt->send_time + US_TO_CYCLES(pq_info.delay_us) > rte_rdtsc()) { 
+				rte_ring_enqueue(queue->ring, pkt);
 				continue;
 			}
 
 			if (pq_info.drop_rate > 0 && rte_rand() / (double)UINT32_MAX < pq_info.drop_rate) {
-				rte_pktmbuf_free(m);
+				rte_pktmbuf_free(pkt);
 				continue;
 			}
 
 			if (pq_info.double_rate > 0 && rte_rand() / (double)UINT32_MAX < pq_info.double_rate) {
-				struct rte_mbuf *dup_pkt = rte_pktmbuf_clone(m, netem_pktmbuf_pool);
+				struct rte_mbuf *dup_pkt = rte_pktmbuf_clone(pkt, netem_pktmbuf_pool);
 				if (dup_pkt != NULL) {
 					enqueue_packet(dup_pkt, pq_info, queue);
 				} else {
@@ -235,9 +238,11 @@ void worker_process_packet(void *args) {
 				}
 			}
 
-			pkts_burst[valid_count] = pkts_burst[i];	
-			valid_count++;
-			// Process the packet (e.g., send it out, or further processing)
+			int sent = rte_eth_tx_buffer(tx_port_id, 0, buffer, pkt->m);
+			if (sent) port_statistics[tx_port_id].tx += sent;
+
+            // 6. Free the metadata wrapper back to its pool
+            rte_mempool_put(queue->item_pool, pkt);
 		}
 	}
 }
