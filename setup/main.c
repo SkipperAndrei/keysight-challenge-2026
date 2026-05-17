@@ -363,15 +363,10 @@ static void print_stats(void)
 /* main processing loop */
 static void netem_main_loop(void)
 {
-	struct rte_mbuf *pkts_burst[MAX_PKT_BURST];
-	struct rte_mbuf *m;
-	int sent;
 	unsigned lcore_id;
 	uint64_t prev_tsc, diff_tsc, cur_tsc, timer_tsc;
-	unsigned i, nb_rx;
 	const uint64_t drain_tsc =
 		(rte_get_tsc_hz() + US_PER_S - 1) / US_PER_S * BURST_TX_DRAIN_US;
-	struct rte_eth_dev_tx_buffer *buffer;
 
 	prev_tsc = 0;
 	timer_tsc = 0;
@@ -400,11 +395,7 @@ static void netem_main_loop(void)
 
 		diff_tsc = cur_tsc - prev_tsc;
 		if (unlikely(diff_tsc > drain_tsc)) {
-			buffer = tx_buffer[tx_port_id];
-
-			sent = rte_eth_tx_buffer_flush(tx_port_id, 0, buffer);
-			if (sent)
-				port_statistics[tx_port_id].tx += sent;
+			
 
 			/* if timer is enabled */
 			if (timer_period > 0) {
@@ -424,35 +415,6 @@ static void netem_main_loop(void)
 
 			prev_tsc = cur_tsc;
 		}
-
-		/* Read packet from RX queue */
-		nb_rx = rte_eth_rx_burst(rx_port_id, 0, pkts_burst, MAX_PKT_BURST);
-		if (unlikely(nb_rx == 0))
-			/*  Nothing received? Continue. */
-			continue;
-
-		port_statistics[rx_port_id].rx += nb_rx;
-
-		for (i = 0; i < nb_rx; i++) {
-			m = pkts_burst[i];
-
-			/* Drop one in 10 packets, the 5th one. */
-			if (i % 10 == 5) {
-				/* ToDo: correctly drop based on total RX packets, not
-				 * while iterating the burst (e.g. 32 packets burst)
-				 */
-				rte_pktmbuf_free(m);
-				continue;
-			}
-
-			rte_prefetch0(rte_pktmbuf_mtod(m, void *));
-
-			buffer = tx_buffer[tx_port_id];
-
-			sent = rte_eth_tx_buffer(tx_port_id, 0, buffer, m);
-			if (sent)
-				port_statistics[tx_port_id].tx += sent;
-		}
 	}
 }
 
@@ -461,8 +423,11 @@ static int netem_launch_one_lcore(__rte_unused void *dummy)
 	unsigned int lcore_id = rte_lcore_id();
 	unsigned int lcore_idx = rte_lcore_index(lcore_id);
 
-	if (lcore_idx < 2) {
-		producer(&lcore_idx);
+	if (lcore_idx == 0) {
+		netem_main_loop();
+	} else if (lcore_idx < 3) {
+		int queue_id = lcore_idx - 1;
+		producer(&queue_id);
 	} else {
 		int queue_id = lcore_idx % 2;
 		worker_process_packet(&queue_id);
