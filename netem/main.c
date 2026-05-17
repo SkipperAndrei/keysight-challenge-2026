@@ -62,13 +62,59 @@ typedef struct delayed_t {
 
 typedef struct packet_t {
 	struct rte_mbuf *m;
-	double drop_rate;
-	double double_rate;
-	uint64_t delay_us;
 	uint8_t pq_id;
 } packet_t;
 
-PQ_t pq[NB_PORTS][NUM_QUEUES];
+typedef struct PQ_t {
+	uint8_t pq_id;
+	double drop_rate;
+	double double_rate;
+	uint64_t delay_us;
+} PQ_t;
+
+PQ_t pq[NUM_QUEUES];
+
+typedef struct packet_queue_t {
+	struct rte_ring *ring;
+	struct rte_mempool *item_pool;
+	uint16_t pq_id;
+} packet_queue_t;
+
+int enqueue_packet(packet_queue_t *queue, rte_mbuf *mbuf, PQ_t pq) {
+	void *msg = NULL;
+	packet_t *pkt;
+
+	if (rte_mempool_get(queue->item_pool, &msg) < 0) {
+		// Out of memory structures; drop packet safely
+		rte_pktmbuf_free(mbuf);
+		return -1;
+	}
+
+	pkt = (packet_t *)msg;
+	pkt->m = mbuf;
+	pkt->pq_id = pq.pq_id;
+
+	if (rte_ring_enqueue(queue->ring, pkt) < 0) {
+		// Ring is completely full; clean up allocations to prevent memory leaks
+		rte_pktmbuf_free(mbuf);
+		rte_mempool_put(queue->item_pool, pkt);
+		return -1;
+	}
+
+	return 0;
+}
+
+int dequeue_packet(packet_queue_t *queue, packet_t **pkt) {
+	void *msg = NULL;
+
+	if (rte_ring_dequeue(queue->ring, &msg) < 0) {
+		// Ring is empty; no packet to process
+		return -1;
+	}
+
+	*pkt = (packet_t *)msg;
+	return 0;
+}
 
 /* ethernet addresses of ports */
 static struct rte_ether_addr netem_ports_eth_addr[NB_PORTS];
