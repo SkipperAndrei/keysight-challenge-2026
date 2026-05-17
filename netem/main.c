@@ -70,6 +70,7 @@ typedef struct packet_t {
 	struct rte_mbuf *m;
 	uint8_t pq_id;
 	uint64_t send_time;
+	uint16_t rx_port_id, tx_port_id;
 } packet_t;
 
 typedef struct PQ_t {
@@ -103,21 +104,21 @@ typedef struct packet_queue_t {
 } packet_queue_t;
 
 #define QUEUE_RING_SIZE 4096
-packet_queue_t *queue_receiver;
-packet_queue_t *queue_transmiter;
+packet_queue_t *queues[2];
 
-packet_queue_t *init_packet_queue()
+packet_queue_t *init_packet_queue(int queue_id)
 {
 	packet_queue_t *queue =
 		rte_zmalloc("PQ_STATE", sizeof(struct packet_queue_t), 0);
-	char name_buf[] = "ring_pq";
+	char name_buf[20];
 
     // Initialize lockless ring optimized for Single-Producer / Single-Consumer mapping
+	sprintf(name_buf, "ring_pq_%d", queue_id);
 	queue->ring = rte_ring_create(name_buf, QUEUE_RING_SIZE, rte_socket_id(),
 								  RING_F_SP_ENQ | RING_F_SC_DEQ);
 
 	// Initialize an ultra-fast local object cache pool for your custom struct elements
-	char name_buf[] = "pool_pq";
+	sprintf(name_buf, "pool_pq_%d", queue_id);
 	queue->item_pool = rte_mempool_create(name_buf, QUEUE_RING_SIZE - 1, sizeof(packet_t),
                                        0, 0, NULL, NULL, NULL, NULL, 
                                        rte_socket_id(), 0);
@@ -129,7 +130,8 @@ packet_queue_t *init_packet_queue()
 	return queue;
 }
 
-int enqueue_packet(rte_mbuf *mbuf, PQ_t pq) {
+int enqueue_packet(rte_mbuf *mbuf, PQ_t pq, packet_queue_t* queue)
+{	
 	void *msg = NULL;
 	packet_t *pkt;
 
@@ -153,7 +155,7 @@ int enqueue_packet(rte_mbuf *mbuf, PQ_t pq) {
 	return 0;
 }
 
-int dequeue_packet(packet_t **pkt) {
+int dequeue_packet(packet_t **pkt, int queue_id, packet_queue_t* queue) {
 	void *msg = NULL;
 
 	if (rte_ring_dequeue(queue->ring, &msg) < 0) {
@@ -194,16 +196,17 @@ static inline uint8_t classify_packet_to_config_idx(struct rte_mbuf *m)
 void worker_process_packet(void *args) {
 	uint8_t nb_packets_in_queue = 0;
 	uint8_t valid_count = 0;
-	int queue_type = *(int *)args; // 0 for receiver, 1 for transmitter
+	int queue_id = *(int *)args; // 0 for receiver, 1 for transmitter
 	PQ_t pq_info;
+
+	packet_queue_t *queue = queues[queue_id];
+
 	while (!force_quit) {
 		struct rte_mbuf *pkts_burst[MAX_PKT_BURST];
 
-		if (queue_type == 0) 
-			nb_packets_in_queue = rte_ring_dequeue_burst(queue_receiver->ring, (void **)pkts_burst, MAX_PKT_BURST);
-		else 
-			nb_packets_in_queue = rte_ring_dequeue_burst(queue_producer->ring, (void **)pkts_burst, MAX_PKT_BURST);
-		
+		nb_packets_in_queue = rte_ring_dequeue_burst(
+			queue->ring, (void **)pkts_burst, MAX_PKT_BURST);
+
 		valid_count = 0;
 		if (unlikely(nb_packets_in_queue == 0))
 			continue;
@@ -226,7 +229,7 @@ void worker_process_packet(void *args) {
 			if (pq_info.double_rate > 0 && rte_rand() / (double)UINT32_MAX < pq_info.double_rate) {
 				struct rte_mbuf *dup_pkt = rte_pktmbuf_clone(m, netem_pktmbuf_pool);
 				if (dup_pkt != NULL) {
-					enqueue_packet(dup_pkt, pq_info);
+					enqueue_packet(dup_pkt, pq_info, queue);
 				} else {
 					RTE_LOG(WARNING, NETEM, "Failed to clone packet for doubling in PQ %u\n", pq_info.pq_id);
 				}
@@ -236,8 +239,29 @@ void worker_process_packet(void *args) {
 			valid_count++;
 			// Process the packet (e.g., send it out, or further processing)
 		}
-		
-		
+	}
+}
+
+void producer(void *args) {
+	int rx_port_id = *((int *)args);
+
+	while (!force_quit) {
+		struct rte_mbuf *pkts_burst[MAX_PKT_BURST];
+		unsigned nb_rx = rte_eth_rx_burst(rx_port_id, 0, pkts_burst, MAX_PKT_BURST);
+
+		if (unlikely(nb_rx == 0))
+			/*  Nothing received? Continue. */
+			continue;
+
+		port_statistics[rx_port_id].rx += nb_rx;
+
+		for (int i = 0; i < nb_rx; i++) {
+			rte_prefetch0(rte_pktmbuf_mtod(pkts_burst[i], void *));
+			struct rte_mbuf *m = pkts_burst[i];
+
+			uint8_t pq_idx = classify_packet_to_config_idx(m);
+			enqueue_packet(m, pq[pq_idx], queues[rx_port_id]);
+		}
 	}
 }
 
@@ -432,8 +456,8 @@ int main(int argc, char **argv)
 	argv += ret;
 
 	// Init the packet queue
-	queue_receiver = init_packet_queue();
-	queue_transmiter = init_packet_queue();
+	queues[0] = init_packet_queue(0);
+	queues[1] = init_packet_queue(1);
 
 	force_quit = false;
 	signal(SIGINT, signal_handler);
